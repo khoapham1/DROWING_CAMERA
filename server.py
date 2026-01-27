@@ -146,21 +146,18 @@ def mjpeg_generator():
 
                 if hasattr(controller, 'detected_persons'):
                     for det in controller.detected_persons:
-                        if "bbox" not in det or "id" not in det:
+                        if "bbox" not in det:
                             continue
 
                         bbox = det["bbox"]
-                        x1, y1, x2, y2 = map(int, bbox)
-                        track_id = det.get("id", "?")
-                        
-                        # Lấy drowning_state từ detection
+                        x1, y1, x2, y2 = map(int, bbox)                        # Lấy drowning_state từ detection
                         drowning_state = det.get("drowning_state", {})
                         state = drowning_state.get("state", "ACTIVE")
 
                         # Màu theo trạng thái (giống trong draw_results)
                         colors = {
                             "ACTIVE": (0, 255, 0),    # xanh lá - BGR
-                            "WARNING": (0, 165, 255), # vàng cam
+                            "FROZEN": (0, 165, 255),  # vàng cam
                             "SOS": (0, 0, 255)        # đỏ
                         }
                         color = colors.get(state, (0, 255, 0))
@@ -176,7 +173,7 @@ def mjpeg_generator():
                                         (255, 255, 0), 1, cv2.LINE_AA)
 
                         # Text trạng thái + ID
-                        cv2.putText(cv_image, f"ID {track_id} | {state}",
+                        cv2.putText(cv_image, f"{state}",
                                     (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
                         # Thời gian SOS nếu đang SOS
@@ -297,8 +294,8 @@ def update_person_detection():
             'timestamp': data.get('timestamp', time.time()),
             'count': data.get('count', 0)
         })
-        
-        print(f"📍 Person detection: {data.get('count', 0)} persons at lat={data.get('lat', 0):.6f}, lon={data.get('lon', 0):.6f}")
+        print(f" SOS at lat ={data.get('lat', 0):.6f}, lon={data.get('lon', 0):.6f}, alt={data.get('alt', 0):.2f} with {data.get('count', 0)} persons")
+        # print(f"📍 Person detection: {data.get('count', 0)} persons at lat={data.get('lat', 0):.6f}, lon={data.get('lon', 0):.6f}")
         
         return jsonify({'status': 'success', 'count': data.get('count', 0)})
         

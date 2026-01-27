@@ -170,13 +170,13 @@ pose = mp_pose.Pose(
 
 # ===== CONFIGURATION MEDIAPIPE ========
 DROWNING_CONFIG = {
-    "SOS_FRAMES": 40,
-    "WARNING_FRAMES": 20,
-    "ARM_SPEED_TH": 8,
-    "BODY_MOVE_TH": 4,
-    "HEAD_SHOULDER_RATIO_TH": 0.9,
-    "FACE_WATER_TH": 0.15,
-    "VERTICAL_ANGLE_TH": 30
+    "WRIST_SPEED_TH": 260.0,
+    "WRIST_ACCEL_TH": 700.0,
+    "ELBOW_ANGLE_SPEED_TH": 140.0,
+    "T_FROZEN": 1.5,
+    "T_SOS": 3.0,
+    "RESET_GAP": 1.0,
+    "HEAD_Y_MARGIN": 0.0
 }
 
 # ===================== DRONE CONTROLLER =====================
@@ -243,14 +243,24 @@ class DroneController:
 
         
         # Person detection
-        self.person_detector = PersonDetector("yolov5n_quant.onnx", IMG_SIZE, 0.4, 0.45)
+        self.person_detector = PersonDetector("yolov5n_quant.onnx", IMG_SIZE, 0.45, 0.45, detect_interval=1)
         self.person_thread = None
         self.person_running = False
         self.detected_persons = []
         self.last_detection_time = 0
-        self.detection_interval = 0.1  # 2 FPS for detection
+        self.detection_interval = 0.05  # seconds between processing steps (loop pacing only)
         self.drowing_detector = DrowningDetector(DROWNING_CONFIG)
+        # Rate-limit server posting (do NOT block detection loop)
+        self.server_post_interval = 2.0
+        self._last_server_post = 0.0
         self.latest_pose_landmarks = None
+        self.server_post_interval = 2.0 
+        self._last_server_post = 0.0
+
+        #SOS send control
+        self._sos_active = False
+        self._last_sos_post = 0.0
+        self.sos_post_interval = 1
         
 
     # -------- Telemetry listeners --------
@@ -343,54 +353,54 @@ class DroneController:
         print("✅ Person detection started")
 
     # ------- MEDIAPIPE --------
-    def draw_results(self, frame, bbox, results, track_id):
-        """Vẽ kết quả phát hiện lên frame"""
-        x1, y1, x2, y2 = bbox
-        
-        # Lấy màu theo trạng thái
+    
+    def draw_results(self, frame, bbox, results):
+        """Overlay drowning state (single person, no ID)."""
+        x1, y1, x2, y2 = map(int, bbox)
+
         colors = {
             "ACTIVE": (0, 255, 0),
-            "WARNING": (0, 165, 255),
+            "FROZEN": (0, 165, 255),
             "SOS": (0, 0, 255)
         }
-        color = colors.get(results["state"], (0, 255, 0))
-        
-        # Vẽ bounding box
+        state = results.get("state", "ACTIVE")
+        color = colors.get(state, (0, 255, 0))
+
+        # bounding box
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        
-        # Vẽ đường mực nước
-        water_y = int(results["water_level"])
-        cv2.line(frame, (x1, water_y), (x2, water_y), 
-                (255, 255, 0), 1, cv2.LINE_AA)
-        
-        # Vẽ thông tin trạng thái
-        cv2.putText(frame, f"ID {track_id} | {results['state']}", 
-                (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        
-        # Hiển thị thời gian SOS nếu có
-        if results["state"] == "SOS":
-            sos_duration = results.get("sos_duration", 0)
-            cv2.putText(frame, f"SOS: {sos_duration:.1f}s", 
-                    (x1, y1 - 30), cv2.FONT_HERSHEY_SIMPLEX, 
-                    0.6, color, 2)
-        
-        # Thông tin chi tiết (chỉ hiển thị nếu có đủ không gian)
+
+        # water line (optional)
+        water_y = results.get("water_level", None)
+        if water_y is not None:
+            wy = int(water_y)
+            cv2.line(frame, (x1, wy), (x2, wy), (255, 255, 0), 1, cv2.LINE_AA)
+
+        # main state label
+        cv2.putText(frame, f"{state}", (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+        # SOS duration
+        if state == "SOS":
+            sos_duration = results.get("sos_duration", 0.0)
+            cv2.putText(frame, f"SOS: {sos_duration:.1f}s", (x1, y1 - 35),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        # lightweight debug (optional, only if enough space)
         h, w = frame.shape[:2]
-        if (y2 + 100) < h:
+        if (y2 + 70) < h:
             info_y = y2 + 20
-            info_lines = [
-                f"ArmAbove: {results['arm_above_head']}",
-                f"ArmSpeed: {results['arm_speed']:.1f}",
-                f"Frozen: {results['body_frozen']}",
-                f"HeadRatio: {results['head_shoulder_ratio']:.2f}",
-                f"Tilt: {results['body_tilt']:.1f}°",
-                f"FaceWater: {results['face_in_water']}"
+            lines = [
+                f"AboveHead: {results.get('arm_above_head', False)}",
+                f"Waving: {results.get('waving', False)}",
+                f"Vwrist: {results.get('wrist_speed', 0.0):.0f}px/s",
+                f"A: {results.get('wrist_accel', 0.0):.0f}px/s2",
+                f"Ang: {results.get('elbow_angle_speed', 0.0):.0f}deg/s",
+                f"T: {results.get('trigger_elapsed', 0.0):.1f}s",
             ]
-            
-            for i, line in enumerate(info_lines):
-                cv2.putText(frame, line, (x1, info_y + i*15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 0), 1)
-        
+            for i, line in enumerate(lines):
+                cv2.putText(frame, line, (x1, info_y + i * 15),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+
         return color
 
     def draw_skeleton(self, frame, pose_landmarks, color):
@@ -426,10 +436,10 @@ class DroneController:
 
                 nparr = np.frombuffer(frame_jpeg, np.uint8)
                 cv_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                # cv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
                 h, w = cv_image.shape[:2]
 
-                pose_res = pose.process(cv_image)
+                rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+                pose_res = pose.process(rgb)
                 if pose_res.pose_landmarks:
                     self.latest_pose_landmarks = pose_res.pose_landmarks
                 
@@ -438,13 +448,11 @@ class DroneController:
                 
                 # Phát hiện người bằng YOLO
                 detections = self.person_detector.detect(cv_image)
-                states = {"ACTIVE": 0, "WARNING": 0, "SOS": 0}
+                states = {"ACTIVE": 0, "FROZEN": 0, "SOS": 0}
 
                 for det in detections:
                     track = det["track_obj"]
                     bbox = det["bbox"]
-                    track_id = det["id"]
-                    
                     # Phát hiện đuối nước
                     results = self.drowing_detector.detect(
                         track, bbox, pose_res.pose_landmarks, (h, w)
@@ -458,18 +466,18 @@ class DroneController:
                     det["drowning_state"] = results
                     
                     # Cập nhật thống kê
-                    states[results["state"]] += 1
+                    states[results['state']] = states.get(results['state'], 0) + 1
                     
                     # Vẽ kết quả lên frame
-                    color = self.draw_results(cv_image, bbox, results, track_id)
+                    color = self.draw_results(cv_image, bbox, results)
                     
                     # Vẽ skeleton
                     if pose_res.pose_landmarks:
                         self.draw_skeleton(cv_image, pose_res.pose_landmarks, color)
                 
                 # Hiển thị thống kê
-                cv2.putText(cv_image, 
-                   f"Active: {states['ACTIVE']} | Warn: {states['WARNING']} | SOS: {states['SOS']}", 
+                cv2.putText(cv_image,
+                   f"Active: {states.get('ACTIVE',0)} | Frozen: {states.get('FROZEN',0)} | SOS: {states.get('SOS',0)}",
                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
                 try:
@@ -478,42 +486,79 @@ class DroneController:
                 except:
                     pass
                     
-                self.detected_persons = detections
+                self.detected_persons = detections[:1] if detections else []
                 self.last_detection_time = current_time
+        # ===== SOS only GPS report =====
+                sos_dets = [d for d in detections if d.get("drowning_state", {}).get("state") == "SOS"]
+                sos_now = len(sos_dets) > 0 
 
-                if detections:
-                    # Get current GPS position
-                    if self.vehicle:
+                # Detect SOS
+                just_entered_sos = (sos_now and not self._sos_active)
+                if not sos_now:
+                    self._sos_active = False
+
+                if sos_now:
+                    self._sos_active = True
+                    allow_send = just_entered_sos or ((current_time - self._last_sos_post) >= self.sos_post_interval)
+                    if allow_send and self.vehicle:
                         try:
-                            loc = self.vehicle.location.global_frame
-                            if loc is None or loc.lat is None or loc.lon is None:
-                                loc = self.vehicle.location.global_relative_frame
+                            gf = self.vehicle.location.global_frame
+                            gr = self.vehicle.location.global_relative_frame
 
-                            if loc and loc.lat and loc.lon:
-                                # Send to server
-                                self.send_person_detection_to_server(
-                                    lat=float(loc.lat),
-                                    lon=float(loc.lon),
-                                    alt=float(loc.alt) if loc.alt else 0.0,
-                                    detections=detections
-                                )
-                            time.sleep(2)
+                            lat = gf.lat if (gf and gf.lat is not None) else None
+                            lon = gf.lon if (gf and gf.lon is not None) else None
+                            alt = gr.alt if (gr and gr.alt is not None) else (gf.alt if (gf and hasattr(gf, 'alt')) else 0.0)
+
+                            if lat is not None and lon is not None:
+                                self._last_sos_post = current_time
+                                threading.Thread(
+                                    target=self.send_person_detection_to_server,
+                                    args=(float(lat), float(lon), float(alt), sos_dets),
+                                    daemon=True
+                                ).start()
+                                print("🚨 SOS detected! Sending alert to server...")
                         except Exception as e:
-                            print(f"Error getting GPS for detection: {e}")
-
+                            print(f"Error getting GPS for SOS detection: {e}")
             except Exception as e:
                 print(f"Person detection error: {e}")
                 time.sleep(0.1)
+
+    def _sanitize_detections(self, detections):
+        """Make detections JSON-serializable (remove track_obj, cast types)."""
+        out = []
+        for d in (detections or []):
+            if not isinstance(d, dict):
+                continue
+            dd = {k: v for k, v in d.items() if k not in ('track_obj','id')}
+            if 'id' in dd:
+                try:
+                    dd['id'] = int(dd['id'])
+                except Exception:
+                    pass
+            if 'bbox' in dd and isinstance(dd['bbox'], (list, tuple)) and len(dd['bbox']) == 4:
+                try:
+                    dd['bbox'] = [int(round(float(x))) for x in dd['bbox']]
+                except Exception:
+                    pass
+            if 'confidence' in dd:
+                try:
+                    dd['confidence'] = float(dd['confidence'])
+                except Exception:
+                    pass
+            out.append(dd)
+        return out
 
     def send_person_detection_to_server(self, lat, lon, alt, detections):
         """Send person detection results to server"""
         try:
             person_data = {
+                'event': 'SOS',
+                'state': 'SOS',
                 'lat': lat,
                 'lon': lon,
                 'alt': alt,
                 'timestamp': time.time(),
-                'detections': detections,
+                'detections': self._sanitize_detections(detections),
                 'count': len(detections)
             }
             

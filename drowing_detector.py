@@ -4,271 +4,272 @@ from collections import deque
 import time
 
 class DrowningDetector:
+    """
+    Drowning / distress detector (single person) using MediaPipe Pose.
+    Requirements implemented:
+      1) Trigger when ONE hand is above head AND arm/wrist motion becomes abnormally fast (speed/accel/angle-speed).
+      2) State machine:
+           - Immediately "ACTIVE" when trigger is seen (ready to alert).
+           - If trigger persists for >= 3s => "FROZEN"
+           - If trigger persists for >= 5s => "SOS"
+         If trigger disappears for a short gap => reset back to ACTIVE.
+      3) No ID logic here (handled in UI). This module only returns state and features.
+    """
+
     def __init__(self, config=None):
-        # Cấu hình mặc định
         default_config = {
-            "SOS_FRAMES": 40,
-            "WARNING_FRAMES": 20,
-            "ARM_SPEED_TH": 8,
-            "BODY_MOVE_TH": 4,
-            "HEAD_SHOULDER_RATIO_TH": 0.9,
-            "FACE_WATER_TH": 0.15,
-            "VERTICAL_ANGLE_TH": 30
+            # ---- motion thresholds (pixels/sec, pixels/sec^2, degrees/sec) ----
+            "WRIST_SPEED_TH": 260.0,         # fast wrist motion
+            "WRIST_ACCEL_TH": 700.0,         # abnormal acceleration
+            "ELBOW_ANGLE_SPEED_TH": 140.0,   # fast elbow angle change
+
+            # ---- temporal thresholds ----
+            "T_FROZEN": 1.5,                 # seconds of continuous distress before FROZEN
+            "T_SOS": 3.0,                    # seconds of continuous distress before SOS
+            "RESET_GAP": 1.0,                # seconds without trigger to reset
+
+            # ---- head reference ----
+            "HEAD_Y_MARGIN": 0.0,            # wrist must be above (head_center_y - margin)
         }
-        
         self.config = {**default_config, **(config or {})}
-        
+
     def init_track(self, track):
-        """Khởi tạo các biến theo dõi cho một track mới"""
-        if hasattr(track, "inited"):
+        if getattr(track, "_drown_inited", False):
             return
-        track.inited = True
-        track.left_wrist = deque(maxlen=30)
-        track.right_wrist = deque(maxlen=30)
-        track.center_hist = deque(maxlen=30)
-        track.head_shoulder_ratio_hist = deque(maxlen=30)
-        track.body_tilt_hist = deque(maxlen=30)
-        track.face_water_hist = deque(maxlen=15)
-        track.sos_cnt = 0
-        track.warning_cnt = 0
+        track._drown_inited = True
+
+        # joint histories: (x, y, t)
+        track.lw_hist = deque(maxlen=20)
+        track.rw_hist = deque(maxlen=20)
+        track.le_hist = deque(maxlen=20)
+        track.re_hist = deque(maxlen=20)
+
+        # elbow angle histories: (angle_deg, t)
+        track.la_hist = deque(maxlen=20)
+        track.ra_hist = deque(maxlen=20)
+
+        # trigger timers
         track.state = "ACTIVE"
+        track.trigger_start_time = None
+        track.last_trigger_time = None
         track.sos_start_time = None
-    
-    def calculate_angle(self, a, b, c):
-        """Tính góc giữa 3 điểm"""
-        a = np.array(a)
-        b = np.array(b)
-        c = np.array(c)
-        
+
+    @staticmethod
+    def _lm_xy(lm_point, w, h):
+        return float(lm_point.x * w), float(lm_point.y * h)
+
+    @staticmethod
+    def _speed(hist):
+        """Instantaneous speed (px/s) from last 2 points in hist = [(x,y,t), ...]"""
+        if len(hist) < 2:
+            return 0.0
+        x0, y0, t0 = hist[-2]
+        x1, y1, t1 = hist[-1]
+        dt = float(t1 - t0)
+        if dt <= 1e-6:
+            return 0.0
+        return float(math.hypot(x1 - x0, y1 - y0) / dt)
+
+    @staticmethod
+    def _accel(speed_hist):
+        """Acceleration (px/s^2) from last 2 speeds in hist = [(v,t), ...]"""
+        if len(speed_hist) < 2:
+            return 0.0
+        v0, t0 = speed_hist[-2]
+        v1, t1 = speed_hist[-1]
+        dt = float(t1 - t0)
+        if dt <= 1e-6:
+            return 0.0
+        return float((v1 - v0) / dt)
+
+    @staticmethod
+    def _angle(a, b, c):
+        """Angle at point b between ba and bc in degrees."""
+        a = np.array(a, dtype=np.float32)
+        b = np.array(b, dtype=np.float32)
+        c = np.array(c, dtype=np.float32)
         ba = a - b
         bc = c - b
-        
-        cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
-        angle = np.degrees(np.arccos(np.clip(cosine_angle, -1.0, 1.0)))
-        return angle
-    
-    def calculate_body_tilt(self, shoulder_left, shoulder_right, hip_left, hip_right):
-        """Tính độ nghiêng cơ thể"""
-        shoulder_center = ((shoulder_left[0] + shoulder_right[0]) // 2,
-                          (shoulder_left[1] + shoulder_right[1]) // 2)
-        hip_center = ((hip_left[0] + hip_right[0]) // 2,
-                     (hip_left[1] + hip_right[1]) // 2)
-        
-        dx = shoulder_center[0] - hip_center[0]
-        dy = shoulder_center[1] - hip_center[1]
-        
-        if dy == 0:
-            return 90
-        
-        angle = math.degrees(math.atan(abs(dx) / abs(dy)))
-        return angle
-    
-    def calculate_arm_speed(self, hist):
-        """Tính tốc độ di chuyển của tay"""
+        nba = float(np.linalg.norm(ba))
+        nbc = float(np.linalg.norm(bc))
+        if nba < 1e-6 or nbc < 1e-6:
+            return 0.0
+        cosang = float(np.dot(ba, bc) / (nba * nbc))
+        return float(np.degrees(np.arccos(np.clip(cosang, -1.0, 1.0))))
+
+    @staticmethod
+    def _angle_speed(hist):
+        """deg/s from last 2 entries hist=[(angle_deg,t), ...]"""
         if len(hist) < 2:
-            return 0
-        speeds = []
-        for i in range(1, len(hist)):
-            d = math.hypot(hist[i][0] - hist[i-1][0], hist[i][1] - hist[i-1][1])
-            speeds.append(d)
-        return np.mean(speeds) if speeds else 0
-    
+            return 0.0
+        a0, t0 = hist[-2]
+        a1, t1 = hist[-1]
+        dt = float(t1 - t0)
+        if dt <= 1e-6:
+            return 0.0
+        # smallest angular difference
+        da = float((a1 - a0 + 180.0) % 360.0 - 180.0)
+        return float(abs(da) / dt)
+
+    def _update_state_machine(self, track, trigger, now):
+        if trigger:
+            if track.trigger_start_time is None:
+                track.trigger_start_time = now
+            track.last_trigger_time = now
+
+            elapsed = float(now - track.trigger_start_time)
+            if elapsed >= self.config["T_SOS"]:
+                track.state = "SOS"
+                if track.sos_start_time is None:
+                    track.sos_start_time = now
+            elif elapsed >= self.config["T_FROZEN"]:
+                track.state = "FROZEN"
+                track.sos_start_time = None
+            else:
+                track.state = "ACTIVE"
+                track.sos_start_time = None
+
+            return elapsed
+
+        # trigger = False
+        if track.last_trigger_time is None:
+            # never triggered yet
+            track.state = "ACTIVE"
+            track.trigger_start_time = None
+            track.sos_start_time = None
+            return 0.0
+
+        gap = float(now - track.last_trigger_time)
+        if gap >= self.config["RESET_GAP"]:
+            track.state = "ACTIVE"
+            track.trigger_start_time = None
+            track.last_trigger_time = None
+            track.sos_start_time = None
+            return 0.0
+
+        # still in cooldown gap -> keep current state but do not advance time
+        return float(now - (track.trigger_start_time or now))
+
     def detect(self, track, bbox, pose_landmarks, frame_shape):
-        """
-        Phát hiện các dấu hiệu đuối nước cho một track
-        
-        Args:
-            track: Track object từ SORT tracker
-            bbox: bounding box [x1, y1, x2, y2]
-            pose_landmarks: MediaPipe pose landmarks
-            frame_shape: (height, width) của frame
-            
-        Returns:
-            dict: Kết quả phát hiện và các thông số
-        """
-        # Khởi tạo track nếu chưa
         self.init_track(track)
-        
-        # Cập nhật bbox
-        track.bbox = bbox
-        
-        # Lấy kích thước frame
-        h, w = frame_shape[:2]
-        
-        # Lấy tọa độ center
-        x1, y1, x2, y2 = bbox
-        cx = (x1 + x2) // 2
-        cy = (y1 + y2) // 2
-        track.center_hist.append((cx, cy))
-        
-        # Khởi tạo kết quả mặc định
+
+        # default results
         results = {
             "state": track.state,
-            "sos_cnt": track.sos_cnt,
             "arm_above_head": False,
-            "arm_speed": 0,
-            "body_frozen": False,
-            "head_shoulder_ratio": 0,
-            "body_tilt": 0,
-            "face_in_water": False,
-            "primary_condition": False,
-            "secondary_condition": False,
-            "tertiary_condition": False,
-            "water_level": y1 + (y2 - y1) * 2/3
+            "waving": False,
+            "wrist_speed": 0.0,
+            "wrist_accel": 0.0,
+            "elbow_angle_speed": 0.0,
+            "trigger_elapsed": 0.0,
+            "water_level": None
         }
-        
-        # Nếu không có pose landmarks, trả về kết quả mặc định
-        if not pose_landmarks:
-            return results
-        
-        lm = pose_landmarks.landmark
-        
-        # Chuyển đổi landmarks sang tọa độ pixel
-        def lm_xy(lm_point):
-            return int(lm_point.x * w), int(lm_point.y * h)
-        
-        # Lấy các điểm quan trọng
-        nose = lm_xy(lm[0])
-        left_eye = lm_xy(lm[1])
-        right_eye = lm_xy(lm[2])
-        left_shoulder = lm_xy(lm[11])
-        right_shoulder = lm_xy(lm[12])
-        left_hip = lm_xy(lm[23])
-        right_hip = lm_xy(lm[24])
-        left_wrist = lm_xy(lm[15])
-        right_wrist = lm_xy(lm[16])
-        
-        # Cập nhật lịch sử cổ tay
-        track.left_wrist.append(left_wrist)
-        track.right_wrist.append(right_wrist)
-        
-        # ================= CÁC ĐIỀU KIỆN PHÁT HIỆN =================
-        
-        # 1. TAY TRÊN ĐẦU
-        head_center_y = (nose[1] + left_eye[1] + right_eye[1]) / 3
-        arm_above_head = (left_wrist[1] < head_center_y) or (right_wrist[1] < head_center_y)
-        results["arm_above_head"] = arm_above_head
-        
-        # 2. TỐC ĐỘ TAY
-        left_speed = self.calculate_arm_speed(track.left_wrist)
-        right_speed = self.calculate_arm_speed(track.right_wrist)
-        arm_speed = (left_speed + right_speed) / 2
-        results["arm_speed"] = arm_speed
-        arm_active = arm_speed > self.config["ARM_SPEED_TH"]
-        
-        # 3. CƠ THỂ BẤT ĐỘNG
-        if len(track.center_hist) > 5:
-            center_list = list(track.center_hist)
-            start_idx = max(0, len(center_list) - 10)
-            recent_centers = center_list[start_idx:]
-            
-            xs = [p[0] for p in recent_centers]
-            ys = [p[1] for p in recent_centers]
-            body_move = np.std(xs) + np.std(ys) if len(xs) > 1 else 999
-        else:
-            body_move = 999
-        
-        body_frozen = body_move < self.config["BODY_MOVE_TH"]
-        results["body_frozen"] = body_frozen
-        
-        # 4. TỶ LỆ ĐẦU-VAI (dấu hiệu đầu chìm)
-        shoulder_width = math.hypot(left_shoulder[0] - right_shoulder[0], 
-                                   left_shoulder[1] - right_shoulder[1])
-        head_height = abs(nose[1] - (left_shoulder[1] + right_shoulder[1]) / 2)
-        
-        if shoulder_width > 0:
-            head_shoulder_ratio = head_height / shoulder_width
-            results["head_shoulder_ratio"] = head_shoulder_ratio
-            track.head_shoulder_ratio_hist.append(head_shoulder_ratio)
-            
-            if len(track.head_shoulder_ratio_hist) >= 15:
-                ratio_list = list(track.head_shoulder_ratio_hist)
-                low_ratio_frames = sum(1 for r in ratio_list 
-                                     if r < self.config["HEAD_SHOULDER_RATIO_TH"])
-                head_submerged = low_ratio_frames >= 10
-            else:
-                head_submerged = False
-        else:
-            head_submerged = False
-        
-        # 5. GÓC NGHIÊNG CƠ THỂ
-        body_tilt = self.calculate_body_tilt(left_shoulder, right_shoulder, 
-                                            left_hip, right_hip)
-        results["body_tilt"] = body_tilt
-        track.body_tilt_hist.append(body_tilt)
-        
-        if len(track.body_tilt_hist) >= 10:
-            tilt_list = list(track.body_tilt_hist)
-            start_idx = max(0, len(tilt_list) - 10)
-            recent_tilts = tilt_list[start_idx:]
-            avg_tilt = np.mean(recent_tilts)
-            body_unstable = avg_tilt > self.config["VERTICAL_ANGLE_TH"]
-        else:
-            body_unstable = False
-        
-        # 6. MẶT Ở DƯỚI NƯỚC
-        water_level = y1 + (y2 - y1) * 2/3
-        face_in_water = nose[1] > water_level
-        results["face_in_water"] = face_in_water
-        results["water_level"] = water_level
-        
-        track.face_water_hist.append(face_in_water)
-        if len(track.face_water_hist) >= 10:
-            water_list = list(track.face_water_hist)
-            face_water_frames = sum(1 for f in water_list if f)
-            prolonged_face_water = face_water_frames >= 8
-        else:
-            prolonged_face_water = False
-        
-        # ================= QUYẾT ĐỊNH ĐA TIÊU CHÍ =================
-        primary_condition = arm_above_head and arm_active and body_frozen
-        secondary_condition = head_submerged and body_unstable
-        tertiary_condition = prolonged_face_water and body_frozen
-        
-        results["primary_condition"] = primary_condition
-        results["secondary_condition"] = secondary_condition
-        results["tertiary_condition"] = tertiary_condition
-        
-        # Cập nhật SOS counter
-        if primary_condition:
-            track.sos_cnt += 2  # Tăng nhanh hơn cho điều kiện chính
-        elif secondary_condition or tertiary_condition:
-            track.sos_cnt += 1
-        else:
-            track.sos_cnt = max(0, track.sos_cnt - 1)
-        
-        # Phân loại trạng thái
-        if track.sos_cnt > self.config["SOS_FRAMES"]:
-            track.state = "SOS"
-            if track.sos_start_time is None:
-                track.sos_start_time = time.time()
-        elif track.sos_cnt > self.config["WARNING_FRAMES"]:
-            track.state = "WARNING"
-            track.sos_start_time = None
-        else:
-            track.state = "ACTIVE"
-            track.sos_start_time = None
-        
-        results["state"] = track.state
-        results["sos_cnt"] = track.sos_cnt
-        
-        # Cập nhật landmarks cho track
-        track.pose_landmarks = pose_landmarks
-        
-        return results
-    
-    def get_state_colors(self):
-        """Trả về màu sắc cho từng trạng thái"""
-        return {
-            "ACTIVE": (0, 255, 0),      # Xanh lá
-            "WARNING": (0, 165, 255),   # Cam
-            "SOS": (0, 0, 255)          # Đỏ
-        }
-    
-    def get_sos_duration(self, track):
-        """Lấy thời gian đã ở trạng thái SOS"""
-        if track.state == "SOS" and track.sos_start_time:
-            return time.time() - track.sos_start_time
-        return 0
 
-        
+        # always compute water line from bbox (for overlay compatibility)
+        x1, y1, x2, y2 = map(float, bbox)
+        results["water_level"] = float(y1 + (y2 - y1) * (2.0 / 3.0))
+
+        if not pose_landmarks:
+            # No pose -> keep previous state (but allow reset after gap)
+            now = time.time()
+            results["trigger_elapsed"] = self._update_state_machine(track, trigger=False, now=now)
+            results["state"] = track.state
+            return results
+
+        h, w = frame_shape[:2]
+        lm = pose_landmarks.landmark
+        now = time.time()
+
+        # Keypoints (MediaPipe indices)
+        nose = self._lm_xy(lm[0], w, h)
+        leye = self._lm_xy(lm[1], w, h)
+        reye = self._lm_xy(lm[2], w, h)
+
+        l_sh = self._lm_xy(lm[11], w, h)
+        r_sh = self._lm_xy(lm[12], w, h)
+        l_el = self._lm_xy(lm[13], w, h)
+        r_el = self._lm_xy(lm[14], w, h)
+        l_wr = self._lm_xy(lm[15], w, h)
+        r_wr = self._lm_xy(lm[16], w, h)
+
+        head_center_y = (nose[1] + leye[1] + reye[1]) / 3.0
+        head_line = head_center_y - float(self.config["HEAD_Y_MARGIN"])
+
+        left_above = (l_wr[1] < head_line)
+        right_above = (r_wr[1] < head_line)
+        arm_above_head = bool(left_above or right_above)
+        results["arm_above_head"] = arm_above_head
+
+        # Update histories with timestamp
+        track.lw_hist.append((l_wr[0], l_wr[1], now))
+        track.rw_hist.append((r_wr[0], r_wr[1], now))
+        track.le_hist.append((l_el[0], l_el[1], now))
+        track.re_hist.append((r_el[0], r_el[1], now))
+
+        # Elbow angles
+        la = self._angle(l_sh, l_el, l_wr)
+        ra = self._angle(r_sh, r_el, r_wr)
+        track.la_hist.append((la, now))
+        track.ra_hist.append((ra, now))
+
+        # Speeds (px/s)
+        lw_speed = self._speed(track.lw_hist)
+        rw_speed = self._speed(track.rw_hist)
+
+        # Speed history for accel (store in track)
+        if not hasattr(track, "lw_speed_hist"):
+            track.lw_speed_hist = deque(maxlen=10)
+            track.rw_speed_hist = deque(maxlen=10)
+        track.lw_speed_hist.append((lw_speed, now))
+        track.rw_speed_hist.append((rw_speed, now))
+
+        lw_acc = self._accel(track.lw_speed_hist)
+        rw_acc = self._accel(track.rw_speed_hist)
+
+        # Angle speed (deg/s)
+        la_speed = self._angle_speed(track.la_hist)
+        ra_speed = self._angle_speed(track.ra_hist)
+
+        # Aggregate for UI
+        results["wrist_speed"] = float(max(lw_speed, rw_speed))
+        results["wrist_accel"] = float(max(lw_acc, rw_acc))
+        results["elbow_angle_speed"] = float(max(la_speed, ra_speed))
+
+        # --- Waving / abnormal motion condition ---
+        # Condition per arm: hand above head AND (fast speed) AND (accel or elbow angle speed fast)
+        def arm_wave(above, w_speed, w_acc, ang_speed):
+            if not above:
+                return False
+            if w_speed > self.config["WRIST_SPEED_TH"] and (w_acc > self.config["WRIST_ACCEL_TH"] or ang_speed > self.config["ELBOW_ANGLE_SPEED_TH"]):
+                return True
+            # very fast wrist alone also counts
+            if w_speed > (self.config["WRIST_SPEED_TH"] * 1.6):
+                return True
+            return False
+
+        left_wave = arm_wave(left_above, lw_speed, lw_acc, la_speed)
+        right_wave = arm_wave(right_above, rw_speed, rw_acc, ra_speed)
+        waving = bool(left_wave or right_wave)
+        results["waving"] = waving
+
+        # --- Trigger logic ---
+        # As requested: seeing ONE hand above head is enough to be "ready" -> trigger starts.
+        # Waving makes it more reliable but we still start timer on above-head.
+        trigger = bool(arm_above_head)
+
+        # State machine
+        results["trigger_elapsed"] = self._update_state_machine(track, trigger=trigger, now=now)
+        results["state"] = track.state
+        return results
+
+    def get_sos_duration(self, track):
+        if getattr(track, "state", None) == "SOS" and getattr(track, "sos_start_time", None):
+            return time.time() - track.sos_start_time
+        return 0.0
+
+    def get_state_colors(self):
+        return {
+            "ACTIVE": (0, 255, 0),
+            "FROZEN": (0, 165, 255),
+            "SOS": (0, 0, 255)
+        }
