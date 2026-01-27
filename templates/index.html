@@ -1,0 +1,1353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Drone Control - Person Detection</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <style>
+        :root{
+            --bg-main: #020617;
+            --bg-card: #0f172a;
+            --bg-soft: #111827;
+            --border-soft: #1f2937;
+            --text-main: #e5e7eb;
+            --text-muted: #9ca3af;
+            --accent: #2563eb;
+            --accent-soft: #1d4ed8;
+            --danger: #dc2626;
+            --success: #16a34a;
+        }
+
+        *{ box-sizing: border-box; }
+
+        body{
+            margin: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: radial-gradient(circle at top, #1e293b 0, var(--bg-main) 45%);
+            color: var(--text-main);
+            min-height: 100vh;
+        }
+
+        header{
+            background: #020617;
+            border-bottom: 1px solid #1f2937;
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        header h1{ 
+            font-size: 20px; 
+            margin: 0; 
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        header h1:before {
+            content: "🚁";
+            font-size: 24px;
+        }
+        header span{ font-size: 13px; color: var(--text-muted); }
+
+        #top-status{
+            font-size: 13px;
+            padding: 4px 12px;
+            border-radius: 999px;
+            background: #16a34a33;
+            color: #4ade80;
+            border: 1px solid #16a34a;
+            font-weight: 500;
+        }
+
+        .main-container{ 
+            padding: 16px 20px 30px 20px;
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        .row{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .card{
+            background: var(--bg-card);
+            border-radius: 10px;
+            padding: 16px;
+            box-shadow: 0 8px 25px rgba(0,0,0,0.4);
+            border: 1px solid var(--border-soft);
+            flex: 1;
+        }
+
+        .card-half{
+            flex: 1 1 calc(50% - 8px);
+            min-width: 300px;
+        }
+
+        .left-camera{ 
+            flex: 1 1 400px;
+            min-width: 400px;
+        }
+        .right-map{ 
+            flex: 2 1 600px;
+            min-width: 400px;
+        }
+
+        .section-title{
+            font-weight: 600;
+            font-size: 16px;
+            margin-bottom: 12px;
+            color: #e5e7eb;
+            padding-bottom: 6px;
+            border-bottom: 1px solid var(--border-soft);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .section-title:before {
+            content: "";
+            display: inline-block;
+            width: 4px;
+            height: 16px;
+            background: var(--accent);
+            border-radius: 2px;
+        }
+
+        #map{
+            height: 400px;
+            width: 100%;
+            background-color: #020617;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid var(--border-soft);
+        }
+
+        #camera-container{ 
+            position: relative; 
+            display: inline-block;
+            width: 100%;
+        }
+
+        #live-camera{
+            width: 100%;
+            max-width: 640px;
+            height: 480px;
+            cursor: pointer;
+            border-radius: 8px;
+            background: #000;
+            object-fit: contain;
+            border: 1px solid #1f2937;
+            display: block;
+            margin: 0 auto;
+        }
+
+        #zoom-btn{
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            background: rgba(15,23,42,0.9);
+            color: var(--text-main);
+            border: 1px solid #1f2937;
+            border-radius: 6px;
+            padding: 6px 14px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            backdrop-filter: blur(4px);
+            transition: all 0.2s;
+        }
+        #zoom-btn:hover{
+            background: rgba(30,41,59,0.95);
+            transform: translateY(-1px);
+        }
+
+        .controls-grid{
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 10px;
+            margin-top: 12px;
+        }
+
+        .controls-grid button,
+        .controls-grid select{
+            padding: 8px 12px;
+            font-size: 13px;
+            border-radius: 8px;
+            border: 1px solid var(--accent-soft);
+            background-color: var(--accent-soft);
+            color: #e5e7eb;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-weight: 500;
+            text-align: center;
+        }
+        .controls-grid button:hover{
+            background-color: var(--accent);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+        }
+        .controls-grid select{
+            background: var(--bg-soft);
+            border-color: var(--border-soft);
+            color: var(--text-main);
+        }
+
+        .controls-grid button.danger-btn{
+            border-color: var(--danger);
+            background: #b91c1c;
+        }
+        .controls-grid button.danger-btn:hover{
+            background: #dc2626;
+            box-shadow: 0 4px 12px rgba(220, 38, 38, 0.3);
+        }
+
+        .controls-grid button.success-btn{
+            border-color: var(--success);
+            background: #16a34a;
+        }
+        .controls-grid button.success-btn:hover{
+            background: #22c55e;
+            box-shadow: 0 4px 12px rgba(34, 197, 94, 0.3);
+        }
+
+        .controls-grid button.warning-btn{
+            border-color: #f59e0b;
+            background: #f59e0b;
+            color: #020617;
+        }
+        .controls-grid button.warning-btn:hover{
+            background: #fbbf24;
+            box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3);
+        }
+
+        .info-panel{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .info-item{
+            background-color: var(--bg-card);
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid var(--border-soft);
+            font-size: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .info-item span{ 
+            color: #fbbf24;
+            font-weight: 600;
+            font-size: 15px;
+        }
+        .info-item.person-count{
+            border-color: #22c55e;
+            background: rgba(34, 197, 94, 0.1);
+        }
+        .info-item.person-count span{
+            color: #22c55e;
+        }
+
+        #detection-info{
+            margin-top: 12px;
+            padding: 10px;
+            background-color: var(--bg-soft);
+            border-radius: 8px;
+            font-size: 13px;
+            border: 1px solid var(--border-soft);
+            min-height: 60px;
+        }
+
+        #point-info{
+            margin-top: 12px;
+            padding: 10px;
+            background-color: var(--bg-soft);
+            border-radius: 8px;
+            font-size: 13px;
+            border: 1px solid var(--border-soft);
+            min-height: 60px;
+        }
+
+        pre{
+            background: var(--bg-soft);
+            color: var(--text-muted);
+            padding: 10px;
+            border-radius: 8px;
+            font-size: 12px;
+            border: 1px dashed #1f2937;
+            font-family: monospace;
+            margin: 8px 0;
+        }
+
+        input[type="text"]{
+            background: var(--bg-soft);
+            color: var(--text-main);
+            border-radius: 8px;
+            border: 1px solid var(--border-soft);
+            padding: 8px 12px;
+            font-size: 13px;
+            width: 100%;
+            margin-bottom: 8px;
+        }
+
+        .point-marker {
+            background-color: #38bdf8;
+            color: #020617;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            text-align: center;
+            line-height: 24px;
+            font-weight: 600;
+            border: 2px solid #020617;
+        }
+
+        .person-marker{
+            background-color: #22c55e;
+            border: 2px solid #020617;
+            border-radius: 50%;
+            color: #020617;
+            font-weight: bold;
+            text-align: center;
+        }
+
+        .detection-cluster {
+            background-color: rgba(34, 197, 94, 0.7);
+            border: 2px solid #16a34a;
+            border-radius: 50%;
+        }
+
+        #recordings-modal{
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: var(--bg-card);
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.8);
+            z-index: 10000;
+            max-width: 500px;
+            width: 90%;
+            border: 1px solid var(--border-soft);
+        }
+        #recordings-modal h3{ 
+            margin: 0 0 16px 0;
+            color: #e5e7eb;
+        }
+        #recordings-list{
+            max-height: 300px;
+            overflow-y: auto;
+            margin: 12px 0;
+            font-size: 13px;
+        }
+        #recordings-list div{
+            padding: 10px;
+            border-bottom: 1px solid var(--border-soft);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        #recordings-list div:last-child{
+            border-bottom: none;
+        }
+
+        #modal-overlay{
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(15,23,42,0.85);
+            backdrop-filter: blur(4px);
+            z-index: 9999;
+        }
+
+        #close-recordings{
+            padding: 8px 16px;
+            background: var(--danger);
+            color: #fee2e2;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            margin-top: 12px;
+            float: right;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .status-connected { background-color: #22c55e; }
+        .status-disconnected { background-color: #dc2626; }
+        .status-detecting { background-color: #f59e0b; }
+
+        .detection-stats {
+            display: flex;
+            gap: 12px;
+            margin-top: 8px;
+        }
+        .stat-box {
+            background: var(--bg-soft);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            border: 1px solid var(--border-soft);
+        }
+        .stat-value {
+            color: #fbbf24;
+            font-weight: bold;
+        }
+
+        .custom-div-icon {
+            background: transparent;
+            border: none;
+        }
+    </style>
+</head>
+<body>
+<header>
+    <div>
+        <h1>Drone Person Detection System</h1>
+        <span>Real-time person detection using YOLOv5 + GPS tracking</span>
+    </div>
+    <div>Status: <span id="top-status">Connected</span></div>
+</header>
+
+<div class="main-container">
+    <div class="row">
+        <div class="card left-camera">
+            <div class="section-title">Live Camera Feed</div>
+            <div id="camera-container">
+                <img id="live-camera"
+                     src="/video_feed"
+                     alt="Live UAV Camera"
+                     onerror="this.onerror=null; this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22640%22 height=%22480%22><rect width=%22100%%22 height=%22100%%22 fill=%22%230f172a%22/><text x=%22320%22 y=%22240%22 text-anchor=%22middle%22 fill=%22%239ca3af%22>No video feed</text></svg>';">
+                <button id="zoom-btn">🔍 Fullscreen</button>
+            </div>
+            <div class="detection-stats">
+                <div class="stat-box">
+                    Detection FPS: <span class="stat-value" id="detection-fps">0</span>
+                </div>
+                <div class="stat-box">
+                    Camera FPS: <span class="stat-value" id="camera-fps">0</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card right-map">
+            <div class="section-title">Flight Map</div>
+            <div id="map"></div>
+            <div style="margin-top: 12px; font-size: 12px; color: #9ca3af;">
+                <span class="status-indicator status-connected"></span> Drone Position
+                <span style="margin-left: 16px;" class="status-indicator" style="background: #22c55e;"></span> Person Detection
+                <span style="margin-left: 16px;" class="status-indicator" style="background: #38bdf8;"></span> Selected Points
+                <span style="margin-left: 16px;" class="status-indicator" style="background: #3b82f6;"></span> Flight Path
+            </div>
+        </div>
+    </div>
+    <div style="margin-top: 16px;">
+        <div class="info-panel">
+            <div class="info-item">
+                <div>Altitude</div>
+                <span id="alt">N/A</span> m
+            </div>
+            <div class="info-item">
+                <div>Flight Mode</div>
+                <span id="mode">N/A</span>
+            </div>
+            <div class="info-item">
+                <div>Velocity</div>
+                <span id="velocity">N/A</span> m/s
+            </div>
+            <div class="info-item">
+                <div>Heading</div>
+                <span id="heading">N/A</span>°
+            </div>
+            <div class="info-item person-count">
+                <div>Persons Detected</div>
+                <span id="person-count">0</span>
+            </div>
+            <div class="info-item">
+                <div>Distance Traveled</div>
+                <span id="distance-traveled">0</span> m
+            </div>
+        </div>
+        
+        <div class="info-panel">
+            <div class="info-item">
+                <div>Recording</div>
+                <span id="recording-status">No</span>
+            </div>
+            <div class="info-item">
+                <div>Recording Duration</div>
+                <span id="recording-duration">0</span> s
+            </div>
+            <div class="info-item">
+                <div>Battery</div>
+                <span id="battery">N/A</span> V
+            </div>
+            <div class="info-item">
+                <div>Armed</div>
+                <span id="armed">No</span>
+            </div>
+            <div class="info-item">
+                <div>GPS Satellites</div>
+                <span id="gps-satellites">0</span>
+            </div>
+            <div class="info-item">
+                <div>Selected Points</div>
+                <span id="selected-points-count">0</span>
+            </div>
+        </div>
+    </div>
+    <!-- MAIN CONTROLS -->
+    <div class="card" style="margin-top: 16px;">
+        <div class="section-title">Flight Controls</div>
+        <div class="controls-grid" id="control-buttons">
+            <button id="arm">Arm Drone</button>
+            <button id="takeoff">Takeoff</button>
+            <button id="land" class="danger-btn">Land</button>
+            <button id="guided">GUIDED Mode</button>
+            <button id="return-home">Return Home</button>
+            <button id="clear-points" class="warning-btn">Clear Points</button>
+            <button id="fly-selected" style="background: #8b5cf6; border-color: #7c3aed;">Fly Selected Points</button>
+            
+            <button id="start-person-detection" class="success-btn">Start Detection</button>
+            <button id="stop-person-detection">Stop Detection</button>
+            <button id="clear-detections">Clear Detections</button>
+            
+            <button id="start-record" class="success-btn">Start Recording</button>
+            <button id="stop-record" class="danger-btn" disabled>Stop Recording</button>
+            <button id="view-recordings">View Recordings</button>
+
+            <select id="speed-select">
+                <option value="0.5">0.5 m/s</option>
+                <option value="0.7" selected>0.7 m/s</option>
+                <option value="1.0">1.0 m/s</option>
+                <option value="1.5">1.5 m/s</option>
+                <option value="2.0">2.0 m/s</option>
+            </select>
+            <button id="set-speed">Set Speed</button>
+        </div>
+        <div id="point-info">Selected Points: None</div>
+        <div id="detection-info">No person detections yet</div>
+        <!-- Thêm style cho trạng thái -->
+        <style>
+            .state-active  { color: #22c55e; font-weight: bold; }
+            .state-warning { color: #f59e0b; font-weight: bold; }
+            .state-sos     { color: #ef4444; font-weight: bold; animation: blink 1s infinite; }
+            @keyframes blink { 50% { opacity: 0.4; } }
+        </style>
+    </div>
+</div>
+
+<!-- RECORDINGS MODAL -->
+<div id="recordings-modal">
+    <h3>📹 Recorded Videos</h3>
+    <div id="recordings-list"></div>
+    <button id="close-recordings">Close</button>
+</div>
+<div id="modal-overlay"></div>
+
+<script>
+    // Initialize Socket.io
+    const socket = io();
+    
+    // Initialize Map
+    const map = L.map('map').setView([10.85095073, 106.77282902], 17);
+    
+    // Tile layers
+    const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+        maxZoom: 22
+    });
+    
+    const googleSat = L.tileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+        attribution: '&copy; Google',
+        maxZoom: 22
+    });
+    
+    const esriSat = L.tileLayer(
+        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        attribution: 'Tiles &copy; Esri',
+        maxZoom: 22
+    });
+    
+    googleSat.addTo(map);
+    L.control.layers({
+        "OpenStreetMap": osm,
+        "Google Satellite": googleSat,
+        "Esri WorldImagery": esriSat
+    }).addTo(map);
+    
+    // Variables
+    let droneMarker = null;
+    let homeMarker = null;
+    let pathPolyline = null;
+    let flownPathPolyline = null;
+    const flownPath = [];
+    let personMarkers = new Map();
+    let detectionMarkers = new Map();
+    let detectionLayer = L.layerGroup().addTo(map);
+    
+    // Point selection variables
+    let selectedPoints = [];
+    let pointMarkers = [];
+    let selectionPathPolyline = null;
+    
+    // Performance monitoring
+    let frameCount = 0;
+    let lastFpsTime = Date.now();
+    let fps = 0;
+    
+    // Recording variables
+    let isRecording = false;
+    let recordingStartTime = 0;
+    let recordingInterval = null;
+    
+    // Performance monitoring
+    setInterval(() => {
+        const now = Date.now();
+        const elapsed = (now - lastFpsTime) / 1000;
+        fps = Math.round(frameCount / elapsed);
+        frameCount = 0;
+        lastFpsTime = now;
+        document.getElementById('camera-fps').textContent = fps;
+    }, 1000);
+    
+    // Update frame count
+    const cameraImg = document.getElementById('live-camera');
+    cameraImg.onload = () => {
+        frameCount++;
+    };
+    
+    // Zoom functionality
+    let isZoomed = false;
+    const zoomBtn = document.getElementById('zoom-btn');
+    
+    zoomBtn.addEventListener('click', () => {
+        if (!isZoomed) {
+            cameraImg.style.position = 'fixed';
+            cameraImg.style.top = '0';
+            cameraImg.style.left = '0';
+            cameraImg.style.width = '100vw';
+            cameraImg.style.height = '100vh';
+            cameraImg.style.zIndex = '9999';
+            cameraImg.style.objectFit = 'contain';
+            cameraImg.style.backgroundColor = '#000';
+            zoomBtn.textContent = '✕ Close';
+            zoomBtn.style.zIndex = '10000';
+            isZoomed = true;
+        } else {
+            cameraImg.style.position = '';
+            cameraImg.style.top = '';
+            cameraImg.style.left = '';
+            cameraImg.style.width = '';
+            cameraImg.style.height = '';
+            cameraImg.style.zIndex = '';
+            cameraImg.style.objectFit = '';
+            cameraImg.style.backgroundColor = '';
+            zoomBtn.textContent = '🔍 Fullscreen';
+            zoomBtn.style.zIndex = '';
+            isZoomed = false;
+        }
+    });
+    
+    // Close fullscreen on ESC
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && isZoomed) {
+            zoomBtn.click();
+        }
+    });
+    
+    // ==================== POINT SELECTION FUNCTIONS ====================
+    
+    function refreshPointInfo() {
+        const infoEl = document.getElementById('point-info');
+        const countEl = document.getElementById('selected-points-count');
+        
+        if (selectedPoints.length === 0) {
+            infoEl.innerHTML = '<div style="color: #9ca3af;">Click on the map to add points. Each point can be dragged and edited.</div>';
+            countEl.textContent = '0';
+            return;
+        }
+        
+        const text = selectedPoints.map(p =>
+            `Point ${p.number}: Lat ${p.lat.toFixed(6)}, Lon ${p.lon.toFixed(6)}, Speed ${p.speed.toFixed(1)} m/s`
+        ).join('<br>');
+        infoEl.innerHTML = text;
+        countEl.textContent = selectedPoints.length;
+    }
+    
+    // Map click handler for adding points
+    map.on('click', function(e) {
+        const lat = e.latlng.lat;
+        const lon = e.latlng.lng;
+        const pointNumber = selectedPoints.length + 1;
+        
+        let speedInput = prompt('Enter speed (m/s, default 0.7):', '0.7');
+        let speed = parseFloat(speedInput);
+        if (isNaN(speed) || speed <= 0) speed = 0.7;
+        
+        const point = { lat: lat, lon: lon, number: pointNumber, speed: speed };
+        selectedPoints.push(point);
+        
+        const marker = L.marker([lat, lon], {
+            draggable: true,
+            icon: L.divIcon({
+                className: 'custom-div-icon',
+                html: `<div class="point-marker">${pointNumber}</div>`,
+                iconSize: [24, 24],
+                iconAnchor: [12, 12]
+            })
+        }).addTo(map).bindPopup(
+            `Point ${pointNumber}<br>Lat: ${lat.toFixed(6)}<br>Lon: ${lon.toFixed(6)}<br>Speed: ${speed.toFixed(1)} m/s<br><small>Drag to move, click to edit speed</small>`
+        );
+        
+        marker.on('dragend', function(ev) {
+            const newLatLng = ev.target.getLatLng();
+            const idx = selectedPoints.findIndex(p => p.number === pointNumber);
+            if (idx !== -1) {
+                selectedPoints[idx].lat = newLatLng.lat;
+                selectedPoints[idx].lon = newLatLng.lng;
+            }
+            updateSelectionPath();
+            refreshPointInfo();
+        });
+        
+        marker.on('click', function() {
+            const idx = selectedPoints.findIndex(p => p.number === pointNumber);
+            const currentSpeed = idx !== -1 ? selectedPoints[idx].speed : speed;
+            const newSpeedInput = prompt(`Edit speed for Point ${pointNumber} (current: ${currentSpeed.toFixed(1)} m/s):`, currentSpeed.toString());
+            const newSpeed = parseFloat(newSpeedInput);
+            if (!isNaN(newSpeed) && newSpeed > 0) {
+                if (idx !== -1) {
+                    selectedPoints[idx].speed = newSpeed;
+                }
+                marker.bindPopup(
+                    `Point ${pointNumber}<br>Lat: ${lat.toFixed(6)}<br>Lon: ${lon.toFixed(6)}<br>Speed: ${newSpeed.toFixed(1)} m/s<br><small>Drag to move, click to edit speed</small>`
+                );
+                refreshPointInfo();
+            }
+        });
+        
+        pointMarkers.push(marker);
+        updateSelectionPath();
+        refreshPointInfo();
+    });
+    
+    function updateSelectionPath() {
+        if (selectionPathPolyline) {
+            map.removeLayer(selectionPathPolyline);
+        }
+        
+        if (selectedPoints.length > 0) {
+            const latlngs = selectedPoints.map(p => [p.lat, p.lon]);
+            selectionPathPolyline = L.polyline(latlngs, {
+                color: '#38bdf8',
+                weight: 3,
+                opacity: 0.8,
+                dashArray: '10, 5'
+            }).addTo(map);
+        }
+    }
+    
+    // Clear points function
+    function clearPoints() {
+        selectedPoints = [];
+        pointMarkers.forEach(marker => map.removeLayer(marker));
+        pointMarkers = [];
+        if (selectionPathPolyline) {
+            map.removeLayer(selectionPathPolyline);
+            selectionPathPolyline = null;
+        }
+        refreshPointInfo();
+    }
+    
+    // ==================== CONTROL BUTTON HANDLERS ====================
+    
+    document.getElementById('arm').onclick = () => {
+        fetch('/arm', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'}
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'armed') {
+                alert('✅ Drone armed successfully');
+                updateStatus('Armed and ready');
+                document.getElementById('armed').textContent = 'Yes';
+                document.getElementById('armed').style.color = '#22c55e';
+            } else {
+                alert('❌ Failed to arm: ' + (data.error || 'Unknown error'));
+            }
+        })
+        .catch(err => {
+            console.error('Arm error:', err);
+            alert('Error arming drone');
+        });
+    };
+    
+    document.getElementById('takeoff').onclick = () => {
+        const height = prompt('Enter takeoff height (m):', '4');
+        if (height && !isNaN(height)) {
+            fetch('/takeoff', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({height: parseFloat(height)})
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    alert(`✅ Taking off to ${height}m`);
+                    updateStatus('Taking off...');
+                } else {
+                    alert('❌ Takeoff failed: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                console.error('Takeoff error:', err);
+                alert('Error during takeoff');
+            });
+        }
+    };
+    
+    document.getElementById('land').onclick = () => {
+        if (confirm('Are you sure you want to land?')) {
+            fetch('/land', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'}
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    alert('✅ Landing initiated');
+                    updateStatus('Landing...');
+                } else {
+                    alert('❌ Landing failed: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                console.error('Land error:', err);
+                alert('Error during landing');
+            });
+        }
+    };
+    
+    document.getElementById('guided').onclick = () => {
+        socket.emit('change_mode', {mode: 'GUIDED'});
+        updateStatus('Switching to GUIDED mode');
+    };
+    
+    document.getElementById('return-home').onclick = () => {
+        if (confirm('Return to home position?')) {
+            fetch('/return_home', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'}
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'returning_home') {
+                    alert('✅ Returning to home position');
+                    updateStatus('Returning home...');
+                } else {
+                    alert('❌ Failed to return home: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                console.error('Return home error:', err);
+                alert('Error returning home');
+            });
+        }
+    };
+    
+    document.getElementById('clear-points').onclick = () => {
+        if (selectedPoints.length > 0 && confirm('Clear all selected points?')) {
+            clearPoints();
+            alert('✅ All points cleared');
+            updateStatus('Points cleared');
+        }
+    };
+    
+    document.getElementById('fly-selected').onclick = () => {
+        if (selectedPoints.length === 0) {
+            alert('No points selected. Click on the map to add points.');
+            return;
+        }
+        
+        if (confirm(`Fly to ${selectedPoints.length} selected points?`)) {
+            fetch('/fly_selected', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({points: selectedPoints})
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'mission_started') {
+                    alert(`✅ Mission started with ${selectedPoints.length} points`);
+                    updateStatus('Mission started');
+                } else {
+                    alert('❌ Failed to start mission: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                console.error('Fly selected error:', err);
+                alert('Error starting mission');
+            });
+        }
+    };
+    
+    // Person detection controls
+    document.getElementById('start-person-detection').onclick = () => {
+        fetch('/start_person_detection', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'}
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                alert('✅ Person detection started');
+                updateStatus('Person detection active');
+                document.getElementById('start-person-detection').disabled = true;
+                document.getElementById('stop-person-detection').disabled = false;
+            } else {
+                alert('❌ Failed to start detection: ' + (data.error || 'Unknown error'));
+            }
+        })
+        .catch(err => {
+            console.error('Start detection error:', err);
+            alert('Error starting detection');
+        });
+    };
+    
+    document.getElementById('stop-person-detection').onclick = () => {
+        fetch('/stop_person_detection', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'}
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                alert('✅ Person detection stopped');
+                updateStatus('Person detection stopped');
+                document.getElementById('start-person-detection').disabled = false;
+                document.getElementById('stop-person-detection').disabled = true;
+            } else {
+                alert('❌ Failed to stop detection: ' + (data.error || 'Unknown error'));
+            }
+        })
+        .catch(err => {
+            console.error('Stop detection error:', err);
+            alert('Error stopping detection');
+        });
+    };
+    
+    document.getElementById('clear-detections').onclick = () => {
+        if (confirm('Clear all person detection markers?')) {
+            fetch('/clear_person_detections', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'}
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'cleared') {
+                    detectionLayer.clearLayers();
+                    detectionMarkers.clear();
+                    document.getElementById('person-count').textContent = '0';
+                    document.getElementById('detection-info').innerHTML = 'No person detections yet';
+                    updateStatus('Detection markers cleared');
+                }
+            })
+            .catch(err => {
+                console.error('Clear detections error:', err);
+                alert('Error clearing detections');
+            });
+        }
+    };
+    
+    // Recording controls
+    document.getElementById('start-record').onclick = () => {
+        fetch('/start_recording', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'}
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                alert(`✅ Recording started: ${data.filename}`);
+                document.getElementById('start-record').disabled = true;
+                document.getElementById('stop-record').disabled = false;
+                document.getElementById('recording-status').textContent = 'Yes';
+                document.getElementById('recording-status').style.color = '#f97316';
+                
+                isRecording = true;
+                recordingStartTime = Date.now();
+                
+                recordingInterval = setInterval(() => {
+                    const duration = Math.floor((Date.now() - recordingStartTime) / 1000);
+                    document.getElementById('recording-duration').textContent = duration;
+                }, 1000);
+                
+                updateStatus('Recording active');
+            } else {
+                alert('❌ Failed to start recording: ' + (data.error || 'Unknown error'));
+            }
+        })
+        .catch(err => {
+            console.error('Start recording error:', err);
+            alert('Error starting recording');
+        });
+    };
+    
+    document.getElementById('stop-record').onclick = () => {
+        fetch('/stop_recording', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'}
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                alert(`✅ Recording stopped. Duration: ${data.duration.toFixed(2)}s`);
+                document.getElementById('start-record').disabled = false;
+                document.getElementById('stop-record').disabled = true;
+                document.getElementById('recording-status').textContent = 'No';
+                document.getElementById('recording-status').style.color = '';
+                document.getElementById('recording-duration').textContent = '0';
+                
+                isRecording = false;
+                if (recordingInterval) {
+                    clearInterval(recordingInterval);
+                    recordingInterval = null;
+                }
+                
+                updateStatus('Recording stopped');
+            } else {
+                alert('❌ Failed to stop recording: ' + (data.error || 'Unknown error'));
+            }
+        })
+        .catch(err => {
+            console.error('Stop recording error:', err);
+            alert('Error stopping recording');
+        });
+    };
+    
+    document.getElementById('view-recordings').onclick = () => {
+        fetch('/get_recordings')
+        .then(res => res.json())
+        .then(data => {
+            const list = document.getElementById('recordings-list');
+            list.innerHTML = '';
+            
+            if (data.recordings && data.recordings.length > 0) {
+                data.recordings.forEach(recording => {
+                    const item = document.createElement('div');
+                    item.innerHTML = `
+                        <div>
+                            <strong>${recording.filename}</strong><br>
+                            <span style="color:#9ca3af;">${recording.size_mb} MB</span>
+                        </div>
+                        <button onclick="window.open('/recordings/${recording.filename}', '_blank')"
+                                style="padding:6px 12px; background:#22c55e; color:#022c22; border:none; border-radius:6px; font-size:12px; cursor:pointer; font-weight:500;">
+                            Download
+                        </button>
+                    `;
+                    list.appendChild(item);
+                });
+            } else {
+                list.innerHTML = '<p style="color:#9ca3af; text-align:center;">No recordings found</p>';
+            }
+            
+            document.getElementById('recordings-modal').style.display = 'block';
+            document.getElementById('modal-overlay').style.display = 'block';
+        })
+        .catch(err => {
+            console.error('Load recordings error:', err);
+            alert('Error loading recordings');
+        });
+    };
+    
+    document.getElementById('close-recordings').onclick = () => {
+        document.getElementById('recordings-modal').style.display = 'none';
+        document.getElementById('modal-overlay').style.display = 'none';
+    };
+    
+    document.getElementById('modal-overlay').onclick = () => {
+        document.getElementById('recordings-modal').style.display = 'none';
+        document.getElementById('modal-overlay').style.display = 'none';
+    };
+    
+    // Speed control
+    document.getElementById('set-speed').onclick = () => {
+        const speed = parseFloat(document.getElementById('speed-select').value);
+        fetch('/set_speed', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({speed: speed})
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                alert(`✅ Speed set to ${speed} m/s`);
+                updateStatus(`Speed: ${speed} m/s`);
+            } else {
+                alert('❌ Failed to set speed');
+            }
+        })
+        .catch(err => {
+            console.error('Set speed error:', err);
+            alert('Error setting speed');
+        });
+    };
+    
+    // Helper functions
+    function updateStatus(message) {
+        const now = new Date();
+        const timeStr = now.toLocaleTimeString();
+        console.log(`[${timeStr}] ${message}`);
+    }
+    
+    function addPersonDetectionMarker(lat, lon, count, timestamp) {
+        const markerId = `det_${timestamp}`;
+        
+        // Remove old marker if exists
+        if (detectionMarkers.has(markerId)) {
+            detectionLayer.removeLayer(detectionMarkers.get(markerId));
+        }
+        
+        const marker = L.circleMarker([lat, lon], {
+            radius: 10 + Math.min(count * 2, 20),
+            fillColor: '#22c55e',
+            color: '#16a34a',
+            weight: 2,
+            opacity: 0.8,
+            fillOpacity: 0.5
+        })
+        .addTo(detectionLayer)
+        .bindPopup(`
+            <b>Person Detection</b><br>
+            Count: ${count}<br>
+            Lat: ${lat.toFixed(6)}<br>
+            Lon: ${lon.toFixed(6)}<br>
+            Time: ${new Date(timestamp * 1000).toLocaleTimeString()}
+        `);
+        
+        detectionMarkers.set(markerId, marker);
+        
+        // Keep only last 50 markers
+        if (detectionMarkers.size > 50) {
+            const oldestKey = Array.from(detectionMarkers.keys())[0];
+            detectionLayer.removeLayer(detectionMarkers.get(oldestKey));
+            detectionMarkers.delete(oldestKey);
+        }
+    }
+    
+    // Socket.io event handlers
+    socket.on('telemetry', function(data) {
+        console.log('Telemetry received:', data);
+
+        if (data.error) {
+            console.error('Telemetry error:', data.error);
+            return;
+        }
+
+        if (data.lat && data.lon) {
+            if (!droneMarker) {
+                droneMarker = L.marker([data.lat, data.lon], {
+                    icon: L.icon({
+                        iconUrl: 'static/drone.png',
+                        iconSize: [32,32],
+                        iconAnchor: [16,16]
+                    })
+                }).addTo(map).bindPopup('Drone');
+                map.setView([data.lat, data.lon], 30);
+            } else {
+                droneMarker.setLatLng([data.lat, data.lon]);
+            }
+
+            if (!homeMarker) {
+                homeMarker = L.marker([data.lat, data.lon], {
+                    icon: L.icon({
+                        iconUrl: 'static/home.png',
+                        iconSize: [32,32],
+                        iconAnchor: [16,32]
+                    })
+                }).addTo(map).bindPopup('Home');
+            }
+
+            flownPath.push([data.lat, data.lon]);
+            if (!flownPathPolyline) {
+                flownPathPolyline = L.polyline(flownPath, {color: '#f97316', weight: 3}).addTo(map);
+            } else {
+                flownPathPolyline.setLatLngs(flownPath);
+            }
+        }
+        // Update status
+        document.getElementById('top-status').textContent = data.connected ? 'Connected' : 'Disconnected';
+        document.getElementById('top-status').style.backgroundColor = data.connected ? '#16a34a33' : '#dc262633';
+        document.getElementById('top-status').style.color = data.connected ? '#4ade80' : '#fca5a5';
+        document.getElementById('top-status').style.borderColor = data.connected ? '#16a34a' : '#dc2626';
+        
+        // Update telemetry display
+        document.getElementById('alt').textContent = data.alt !== undefined ? data.alt.toFixed(2) : 'N/A';
+        document.getElementById('mode').textContent = data.mode || 'N/A';
+        document.getElementById('velocity').textContent = data.velocity !== undefined ? data.velocity.toFixed(2) : 'N/A';
+        document.getElementById('heading').textContent = data.heading !== undefined ? Math.round(data.heading) : 'N/A';
+        document.getElementById('person-count').textContent = data.person_count || 0;
+        document.getElementById('distance-traveled').textContent = data.distance_traveled !== undefined ? data.distance_traveled.toFixed(1) : '0';
+        
+        if (data.battery !== undefined) {
+            document.getElementById('battery').textContent = data.battery.toFixed(1);
+        }
+        
+        if (data.gps_satellites !== undefined) {
+            document.getElementById('gps-satellites').textContent = data.gps_satellites;
+        }
+        
+        // Update drone position on map
+        if (data.lat && data.lon) {
+            if (!droneMarker) {
+                droneMarker = L.marker([data.lat, data.lon], {
+                    icon: L.icon({
+                        iconUrl: 'https://cdn-icons-png.flaticon.com/512/284/284300.png',
+                        iconSize: [40, 40],
+                        iconAnchor: [20, 20]
+                    })
+                }).addTo(map).bindPopup('Drone Position');
+                
+                if (!homeMarker) {
+                    homeMarker = L.marker([data.lat, data.lon], {
+                        icon: L.icon({
+                            iconUrl: 'https://cdn-icons-png.flaticon.com/512/484/484167.png',
+                            iconSize: [30, 30],
+                            iconAnchor: [15, 30]
+                        })
+                    }).addTo(map).bindPopup('Home Position');
+                }
+                
+                map.setView([data.lat, data.lon], 17);
+            } else {
+                droneMarker.setLatLng([data.lat, data.lon]);
+            }
+            
+            // Update flight path
+            flownPath.push([data.lat, data.lon]);
+            if (!flownPathPolyline) {
+                flownPathPolyline = L.polyline(flownPath, {
+                    color: '#3b82f6',
+                    weight: 3,
+                    opacity: 0.7
+                }).addTo(map);
+            } else {
+                flownPathPolyline.setLatLngs(flownPath);
+            }
+            
+            // Keep path length reasonable
+            if (flownPath.length > 1000) {
+                flownPath.splice(0, 500);
+                flownPathPolyline.setLatLngs(flownPath);
+            }
+        }
+    });
+    
+    socket.on('person_detection_update', function(data) {
+        document.getElementById('person-count').textContent = data.count || 0;
+        
+        if (data.lat && data.lon && data.count > 0) {
+            // Add marker on map
+            addPersonDetectionMarker(data.lat, data.lon, data.count, data.timestamp);
+            
+            let stateText = '';
+        // Giả sử detections có drowning_state (cần emit thêm từ server nếu muốn chi tiết)
+        // Hiện tại chỉ hiển thị tổng quát
+        stateText = `<span class="state-sos">SOS/WARNING detected!</span>`;
+
+        document.getElementById('detection-info').innerHTML = `
+            <b>📍 Person & Drowning Detection</b><br>
+            <span style="color:#9ca3af;">Time: ${new Date(data.timestamp * 1000).toLocaleTimeString()}</span><br>
+            <span style="color:#22c55e;">Count: ${data.count} person(s)</span><br>
+            ${stateText}<br>
+            <span style="color:#fbbf24;">Position: ${data.lat.toFixed(6)}, ${data.lon.toFixed(6)}</span>
+            `;
+            // Pan map to detection if it's far from current view
+            const bounds = map.getBounds();
+            if (!bounds.contains([data.lat, data.lon])) {
+                map.panTo([data.lat, data.lon], {animate: true, duration: 1});
+            }
+        }
+    });
+    
+    socket.on('mission_status', function(data) {
+        console.log('Mission status:', data);
+        if (data.status === 'completed') {
+            alert('✅ Mission completed successfully!');
+            updateStatus('Mission completed');
+        } else if (data.status === 'error') {
+            alert('❌ Mission error: ' + data.error);
+            updateStatus('Mission error: ' + data.error);
+        } else if (data.status.includes('mode_changed_to')) {
+            const mode = data.status.replace('mode_changed_to_', '');
+            alert(`✅ Mode changed to ${mode}`);
+            updateStatus(`Mode: ${mode}`);
+        }
+    });
+    
+    socket.on('recording_status', function(data) {
+        console.log('Recording status:', data);
+        if (data.status === 'started') {
+            updateStatus(`Recording started: ${data.filename}`);
+        } else if (data.status === 'stopped') {
+            updateStatus(`Recording stopped: ${data.duration.toFixed(2)}s`);
+        }
+    });
+    
+    socket.on('person_detections_cleared', function() {
+        detectionLayer.clearLayers();
+        detectionMarkers.clear();
+        document.getElementById('person-count').textContent = '0';
+        document.getElementById('detection-info').innerHTML = 'No person detections yet';
+        updateStatus('Detection markers cleared');
+    });
+    
+    socket.on('planned_path', function(data) {
+        console.log('Planned path:', data);
+        if (pathPolyline) {
+            map.removeLayer(pathPolyline);
+        }
+        
+        if (data.waypoints && data.waypoints.length > 0) {
+            const latlngs = data.waypoints.map(wp => [wp.lat, wp.lon]);
+            pathPolyline = L.polyline(latlngs, {
+                color: '#8b5cf6',
+                weight: 4,
+                opacity: 0.8,
+                dashArray: '10, 10'
+            }).addTo(map);
+            
+            if (latlngs.length > 1) {
+                map.fitBounds(pathPolyline.getBounds());
+            }
+        }
+    });
+    
+    // Initialize
+    console.log('Drone Person Detection System initialized');
+    updateStatus('System ready - Connect to drone to begin');
+    
+    // Initial refreshs
+    refreshPointInfo();
+</script>
+</body>
+</html>

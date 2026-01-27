@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Drone Control</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <style>
+        /* #map { height: 600px; width: 50%; } */
+        #map { 
+            height: 600px; 
+            width: 100%;
+            background-color: #ddd;
+}
+
+        .container{
+            display: flex;
+            flex-direction: row;
+            width: 100%;
+        }
+        .left-camera{
+            width:  100%;
+            padding: 10px;
+        }
+        .right-map{
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ccc;
+            background-color: #f9f9f9;
+        }
+        #telemetry { 
+            margin-top: 12px; 
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .controls { 
+            margin: 8px 0; 
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .controls button { 
+            padding: 8px 16px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .controls button:hover {
+            background-color: #0056b3;
+        }
+        #point-info {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #e9ecef;
+            border-radius: 5px;
+        }
+        .info-panel {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .info-item {
+            background-color: #fff;
+            padding: 8px;
+            border-radius: 4px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .aruco-marker {
+            background-color: #ff6b6b;
+            border: 2px solid white;
+            border-radius: 50%;
+            color: white;
+            font-weight: bold;
+            text-align: center;
+            line-height: 24px;
+        }
+    </style>
+</head>
+<body>
+    <!-- <div id="map"></div> -->
+
+    <div class="container">
+        <div class="left-camera">
+            <h2>Live Camera</h2>
+            <div id="camera-container" style="position: relative; display: inline-block;">
+                <img id="live-camera" 
+                    src="/video_feed" 
+                    alt="Live UAV Camera"
+                    style="width: 640px; height: 480px; cursor: pointer; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.3);"
+                    onerror="this.src='placeholder.jpg'; console.log('Stream error');">
+                <button id="zoom-btn" 
+                        style="position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.6); color: white; border: none; border-radius: 4px; padding: 6px 10px; cursor: pointer;">
+                    🔍 Phóng to
+                </button>
+            </div>
+        </div>
+        <div class="right-map">
+            <h2>Map</h2>
+            <!-- Placeholder for the map, e.g., integrate Google Maps or Leaflet here -->
+            <div id="map" style="width: 100%; height: 400px; background-color: #ddd;">Map content goes here (e.g., embed map API)</div>
+        </div>
+    </div>
+
+    <div class="controls" id="station-buttons">
+        <button id="clear">Clear</button>
+        <button id="fly">Fly (test goal)</button>
+        <button id="fly-selected">Fly Selected Points</button>
+        <button id="land">Land</button>
+        <button id="guided">Guided</button>
+        <button id="arm">Arm Drone</button>
+        <button id="return-home">Return Home</button>
+        <button id="clear-aruco">Clear ArUco Markers</button>
+        <button id="start-aruco">Start ArUco Detection</button>
+        <button id="stop-aruco">Stop ArUco Detection</button>
+    </div>
+
+    <div class="info-panel">
+        <div class="info-item">
+            <p>Altitude: <span id="alt">N/A</span> m</p>
+        </div>
+        <div class="info-item">
+            <p>Mode: <span id="mode">N/A</span></p>
+        </div>
+        <div class="info-item">
+            <p>Velocity: <span id="velocity">N/A</span> m/s</p>
+        </div>
+        <div class="info-item">
+            <p>Distance: <span id="distance">0</span> m</p>
+        </div>
+        <div class="info-item">
+            <p>ArUco Markers: <span id="aruco-count">0</span> detected</p>
+        </div>
+    </div>
+    <div style="margin: 20px;">
+        <label for="aruco_ids">Enter ArUco IDs to detect:</label>
+        <input type="text" id="aruco_ids" placeholder="Nhap IDs ArUco, 3-32">
+        <button id="set_aruco_ids">Set ArUco IDs</button>
+        <p id="aruco_ids_status">Current ArUco IDs: ALL (default)</p>
+    </div>
+
+    <div id="point-info">
+        <p>Selected Points: None</p>
+    </div>
+    <script>
+        var socket = io();
+        // Khởi tạo bản đồ
+        var map = L.map('map').setView([10.85095073, 106.77282902], 30);
+
+        // Lớp OpenStreetMap (mặc định)
+        var osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors',
+            maxZoom: 22
+        });
+
+        // Lớp Google Satellite
+        var googleSat = L.tileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+            attribution: '&copy; <a href="https://www.google.com/maps">Google</a>',
+            maxZoom: 22
+        });
+
+        // Lớp ESRI World Imagery (dự phòng)
+        var esriSat = L.tileLayer(
+            'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            attribution: 'Tiles &copy; Esri',
+            maxZoom: 22
+        });
+
+        // Thêm mặc định là Google Satellite
+        googleSat.addTo(map);
+
+        // Cho phép chuyển layer
+        L.control.layers({
+            "OpenStreetMap": osm,
+            "Google Satellite": googleSat,
+            "Esri WorldImagery": esriSat
+        }).addTo(map);
+
+        var pathPolyline = null;
+        var droneMarker = null;
+        var homeMarker = null;
+        var jsonPathPolyline = null;
+        var flownPathPolyline = null;
+        var flownPath = [];
+        var gpsDataGlobal = null;
+        var selectedPoints = [];
+        var pointMarkers = [];
+        var arucoMarkers = {}; // Lưu trữ ArUco markers
+        var arucoLayer = L.layerGroup().addTo(map); // Layer group cho ArUco markers
+
+        // helper: đổi màu theo index
+        function getColorForStation(idx) {
+            const colors = ['red','orange','blue','green','purple','brown','darkcyan','magenta'];
+            return colors[idx % colors.length];
+        }
+
+        // Hàm hiển thị ArUco markers trên bản đồ
+        function updateArucoMarkers(markersData) {
+            // Xóa markers cũ
+            arucoLayer.clearLayers();
+            arucoMarkers = {};
+            
+            // Thêm markers mới
+            for (const [markerId, coords] of Object.entries(markersData)) {
+                if (coords && coords.length === 2) {
+                    const marker = L.marker([coords[0], coords[1]], {
+                        icon: L.divIcon({
+                            className: 'aruco-marker',
+                            html: `<div style="background-color: #ff6b6b; color: white; border-radius: 50%; width: 24px; height: 24px; text-align: center; line-height: 24px; font-weight: bold;">${markerId}</div>`,
+                            iconSize: [10, 10],
+                            iconAnchor: [12, 12]
+                        })
+                    }).addTo(arucoLayer).bindPopup(`ArUco Marker ID: ${markerId}<br>Lat: ${coords[0].toFixed(6)}<br>Lon: ${coords[1].toFixed(6)}`);
+                    arucoMarkers[markerId] = marker;
+                }
+            }
+            
+            document.getElementById('aruco-count').textContent = Object.keys(markersData).length;
+        }
+
+
+        // thêm markers & buttons cho mọi station
+        function addStationMarkers(gpsData) {
+            gpsDataGlobal = gpsData;
+            const controlsDiv = document.getElementById('station-buttons');
+
+            Object.keys(gpsData).forEach((stationName, idx) => {
+                const stationPoints = gpsData[stationName];
+                if (!stationPoints || !stationPoints.length) return;
+
+                // lấy điểm cuối làm marker
+                const last = stationPoints[stationPoints.length - 1];
+                const marker = L.marker([last.lat, last.lon], {
+                    icon: L.icon({ iconUrl: 'static/tracking.png', iconSize: [32,32], iconAnchor: [16,32] })
+                }).addTo(map).bindPopup(`Delivery ${stationName}`);
+
+                marker.on('click', function() {
+                    if (jsonPathPolyline) map.removeLayer(jsonPathPolyline);
+                    const jsonWaypoints = stationPoints.map(st => [st.lat, st.lon]);
+                    jsonPathPolyline = L.polyline(jsonWaypoints, {color: getColorForStation(idx), dashArray: '5,5'}).addTo(map);
+                    map.fitBounds(jsonPathPolyline.getBounds());
+                });
+
+                const btn = document.createElement('button');
+                btn.innerText = `Start ${stationName}`;
+                btn.onclick = function() {
+                    fetch('/start_mission', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({station: stationName})
+                    }).then(res => res.json()).then(data => {
+                        console.log(`Start ${stationName} mission`, data);
+                    });
+                };
+                controlsDiv.appendChild(btn);
+            });
+        }
+
+        // chọn điểm thủ công
+        map.on('click', function(e) {
+            var lat = e.latlng.lat;
+            var lon = e.latlng.lng;
+            var pointNumber = selectedPoints.length + 1;
+            var point = {lat: lat, lon: lon, number: pointNumber};
+            selectedPoints.push(point);
+
+            var marker = L.marker([lat, lon], {
+                draggable: true,
+                icon: L.divIcon({
+                    className: 'custom-div-icon',
+                    html: `<div style='background-color: blue; color: white; border-radius: 50%; width: 24px; height: 24px; text-align: center; line-height: 24px;'>${pointNumber}</div>`,
+                    iconSize: [24, 24],
+                    iconAnchor: [12, 12]
+                })
+            }).addTo(map).bindPopup(`Point ${pointNumber}<br>Lat: ${lat.toFixed(6)}<br>Lon: ${lon.toFixed(6)}`);
+
+            marker.on('dragend', function(event) {
+                var newLatLng = event.target.getLatLng();
+                var idx = selectedPoints.findIndex(p => p.number === pointNumber);
+                if (idx !== -1) {
+                    selectedPoints[idx].lat = newLatLng.lat;
+                    selectedPoints[idx].lon = newLatLng.lng;
+                }
+                if (pathPolyline) map.removeLayer(pathPolyline);
+                pathPolyline = L.polyline(selectedPoints.map(p => [p.lat, p.lon]), {color: 'blue'}).addTo(map);
+                var pointsText = selectedPoints.map(p => 
+                    `Point ${p.number}: Lat ${p.lat.toFixed(6)}, Lon ${p.lon.toFixed(6)}`
+                ).join('<br>');
+                document.getElementById('point-info').innerHTML = pointsText;
+            });
+
+            pointMarkers.push(marker);
+
+            if (pathPolyline) map.removeLayer(pathPolyline);
+            pathPolyline = L.polyline(selectedPoints.map(p => [p.lat, p.lon]), {color: 'blue'}).addTo(map);
+
+            var pointsText = selectedPoints.map(p => 
+                `Point ${p.number}: Lat ${p.lat.toFixed(6)}, Lon ${p.lon.toFixed(6)}`
+            ).join('<br>');
+            document.getElementById('point-info').innerHTML = pointsText;
+        });
+
+        // load stations
+        fetch('/get_gps_stations')
+            .then(res => res.json())
+            .then(gpsData => addStationMarkers(gpsData))
+            .catch(err => console.error('Error loading GPS stations:', err));
+
+        document.getElementById('set_aruco_ids').addEventListener('click', function() {
+            const input = document.getElementById('aruco_ids').value.trim();
+            if (!input) {
+                alert('Please enter IDs separated by commas.');
+                return;
+            }
+            
+            const ids = input.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+            
+            if (ids.length === 0) {
+                alert('Invalid input. Please enter valid numbers.');
+                return;
+            }
+            
+            fetch('/set_aruco_ids', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ids: ids })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    document.getElementById('aruco_ids_status').textContent = `Current ArUco IDs: ${ids.join(', ')}`;
+                    alert('ArUco IDs updated successfully!');
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('ArUco IDs updated successfully!');
+            });
+        });
+
+        // clear
+        document.getElementById('clear').onclick = function() {
+            if (pathPolyline) map.removeLayer(pathPolyline);
+            if (jsonPathPolyline) map.removeLayer(jsonPathPolyline);
+            if (flownPathPolyline) {
+                flownPath = [];
+                flownPathPolyline.setLatLngs([]);
+            }
+            selectedPoints = [];
+            pointMarkers.forEach(marker => map.removeLayer(marker));
+            pointMarkers = [];
+            document.getElementById('point-info').innerText = 'None';
+        };
+
+        // clear ArUco markers
+        document.getElementById('clear-aruco').onclick = function() {
+            arucoLayer.clearLayers();
+            arucoMarkers = {};
+            document.getElementById('aruco-count').textContent = '0';
+            // Gửi yêu cầu xóa markers trên server
+            fetch('/update_aruco_markers', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({markers: {}})
+            });
+        };
+
+        document.getElementById('fly').onclick = function() {
+            flownPath = [];
+            if (flownPathPolyline) flownPathPolyline.setLatLngs([]);
+            fetch('/fly', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({lat: 10.850702, lon: 106.771257})
+            }).then(res => res.json()).then(data => {
+                console.log('Mission started (fly)', data);
+            });
+        };
+
+        // Nút Fly Selected mới
+        document.getElementById('fly-selected').onclick = function() {
+            if (selectedPoints.length === 0) {
+                alert('Please select at least one point on the map');
+                return;
+            }
+            
+            flownPath = [];
+            if (flownPathPolyline) flownPathPolyline.setLatLngs([]);
+            
+            fetch('/fly_selected', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    points: selectedPoints.map(p => ({lat: p.lat, lon: p.lon}))
+                })
+            }).then(res => res.json()).then(data => {
+                console.log('Mission started (selected points)', data);
+            });
+        };
+
+        document.getElementById('land').onclick = function() {
+            socket.emit('change_mode', {mode: 'LAND'});
+        };
+
+        document.getElementById('guided').onclick = function() {
+            socket.emit('change_mode', {mode: 'GUIDED'});
+        };
+        // Add this to the button event handlers
+        document.getElementById('arm').onclick = function() {
+            fetch('/arm', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'}
+            }).then(res => res.json()).then(data => {
+                if (data.status === 'armed') {
+                    console.log('Drone armed successfully', data);
+                    alert('Drone armed successfully!');
+                } else {
+                    console.error('Failed to arm drone', data);
+                    alert('Failed to arm drone: ' + (data.error || 'Unknown error'));
+                }
+            }).catch(err => {
+                console.error('Error arming drone:', err);
+                alert('Error arming drone');
+            });
+        };
+        
+
+        document.getElementById('return-home').onclick = function() {
+            fetch('/return_home', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'}
+            }).then(res => res.json()).then(data => {
+                console.log('Returning home', data);
+            });
+        };
+
+        // Lắng nghe sự kiện cập nhật ArUco markers từ server
+        socket.on('aruco_markers_update', function(data) {
+            console.log('Received ArUco markers:', data.markers); // Debug log
+            updateArucoMarkers(data.markers);
+        });
+        document.getElementById('start-aruco').onclick = function() {
+            fetch('/start_aruco_detection', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'}
+            }).then(res => res.json()).then(data => {
+                if (data.status === 'success') {
+                    alert('ArUco detection started!');
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            });
+        };
+
+        document.getElementById('stop-aruco').onclick = function() {
+            fetch('/stop_aruco_detection', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'}
+            }).then(res => res.json()).then(data => {
+                if (data.status === 'success') {
+                    alert('ArUco detection stopped!');
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            });
+        };
+
+        // Hàm hiển thị ArUco markers trên bản đồ
+        function updateArucoMarkers(markersData) {
+            console.log('Updating ArUco markers:', markersData); // Debug log
+            
+            // Xóa markers cũ
+            arucoLayer.clearLayers();
+            arucoMarkers = {};
+            
+            // Thêm markers mới
+            for (const [markerId, coords] of Object.entries(markersData)) {
+                if (coords && coords.length === 2) {
+                    const marker = L.marker([coords[0], coords[1]], {
+                        icon: L.divIcon({
+                            className: 'aruco-marker',
+                            html: `<div style="background-color: #ff6b6b; color: white; border-radius: 50%; width: 24px; height: 24px; text-align: center; line-height: 24px; font-weight: bold;">${markerId}</div>`,
+                            iconSize: [24, 24],
+                            iconAnchor: [12, 12]
+                        })
+                    }).addTo(arucoLayer).bindPopup(`ArUco Marker ID: ${markerId}<br>Lat: ${coords[0].toFixed(6)}<br>Lon: ${coords[1].toFixed(6)}`);
+                    
+                    arucoMarkers[markerId] = marker;
+                    console.log(`Added marker ${markerId} at ${coords[0]}, ${coords[1]}`); // Debug log
+                }
+            }
+            
+            // Cập nhật số lượng markers
+            document.getElementById('aruco-count').textContent = Object.keys(markersData).length;
+        }
+
+        // Tải markers hiện có khi trang web được load
+        fetch('/get_aruco_markers')
+            .then(res => res.json())
+            .then(markers => updateArucoMarkers(markers))
+            .catch(err => console.error('Error loading ArUco markers:', err));
+
+        socket.on('telemetry', function(data) {
+    console.log('Telemetry received:', data); // Debug log
+    
+    if (data.error) {
+        console.error('Telemetry error:', data.error);
+        return;
+    }
+    
+    if (data.lat && data.lon) {
+        if (!droneMarker) {
+            droneMarker = L.marker([data.lat, data.lon], {
+                icon: L.icon({ 
+                    iconUrl: 'static/drone.png', 
+                    iconSize: [32,32], 
+                    iconAnchor: [16,16] 
+                })
+            }).addTo(map).bindPopup('Drone');
+            
+            // Center map on drone first location
+            map.setView([data.lat, data.lon], 30);
+        } else {
+            droneMarker.setLatLng([data.lat, data.lon]);
+        }
+        
+        // Update home marker only once
+        if (!homeMarker) {
+            homeMarker = L.marker([data.lat, data.lon], {
+                icon: L.icon({ 
+                    iconUrl: 'static/home.png', 
+                    iconSize: [32,32], 
+                    iconAnchor: [16,32] 
+                })
+            }).addTo(map).bindPopup('Home');
+        }
+        
+        // Add to flown path
+        flownPath.push([data.lat, data.lon]);
+        if (!flownPathPolyline) {
+            flownPathPolyline = L.polyline(flownPath, {color: 'red', weight: 3}).addTo(map);
+        } else {
+            flownPathPolyline.setLatLngs(flownPath);
+        }
+    }
+    
+    // Update telemetry display
+    document.getElementById('alt').innerText = data.alt !== undefined ? data.alt.toFixed(2) : 'N/A';
+    document.getElementById('mode').innerText = data.mode || 'N/A';
+    document.getElementById('velocity').innerText = data.velocity !== undefined ? data.velocity.toFixed(2) : 'N/A';
+    document.getElementById('distance').innerText = data.distance_traveled !== undefined ? data.distance_traveled.toFixed(2) : '0';
+});
+
+        socket.on('planned_path', function(data) {
+            if (pathPolyline) map.removeLayer(pathPolyline);
+            pathPolyline = L.polyline(data.waypoints, {color: 'blue'}).addTo(map);
+            map.fitBounds(pathPolyline.getBounds());
+        });
+
+        socket.on('mission_status', function(data) {
+            console.log('Mission status:', data);
+            if (data.status === 'completed') {
+                alert('Mission completed!');
+            } else if (data.status === 'error') {
+                alert('Error: ' + data.error);
+            }
+        });
+        let isZoomed = false;
+        const cameraImg = document.getElementById('live-camera');
+        const zoomBtn = document.getElementById('zoom-btn');
+
+        zoomBtn.addEventListener('click', () => {
+            if (!isZoomed) {
+                cameraImg.style.position = 'fixed';
+                cameraImg.style.top = '50%';
+                cameraImg.style.left = '50%';
+                cameraImg.style.transform = 'translate(-50%, -50%)';
+                cameraImg.style.width = '90vw';
+                cameraImg.style.height = 'auto';
+                cameraImg.style.zIndex = '9999';
+                cameraImg.style.boxShadow = '0 0 20px rgba(0,0,0,0.8)';
+                cameraImg.style.borderRadius = '10px';
+                zoomBtn.textContent = '🔙 Thu nhỏ';
+                isZoomed = true;
+            } else {
+                cameraImg.style.position = '';
+                cameraImg.style.top = '';
+                cameraImg.style.left = '';
+                cameraImg.style.transform = '';
+                cameraImg.style.width = '640px';
+                cameraImg.style.height = '480px';
+                cameraImg.style.zIndex = '';
+                cameraImg.style.boxShadow = '0 0 10px rgba(0,0,0,0.3)';
+                zoomBtn.textContent = '🔍 Phóng to';
+                isZoomed = false;
+            }
+        });
+    </script>
+</body>
+</html>
