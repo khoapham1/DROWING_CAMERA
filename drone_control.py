@@ -243,7 +243,7 @@ class DroneController:
 
         
         # Person detection
-        self.person_detector = PersonDetector("yolov5n_quant.onnx", IMG_SIZE, 0.45, 0.45, detect_interval=1)
+        self.person_detector = PersonDetector("yolov5n_quant.onnx", IMG_SIZE, 0.45, 0.3, detect_interval=1)
         self.person_thread = None
         self.person_running = False
         self.detected_persons = []
@@ -263,7 +263,37 @@ class DroneController:
         self.sos_post_interval = 1
         
 
-    # -------- Telemetry listeners --------
+            # -------- Mission pause / resume (person check) --------
+        # When a person is detected: request pause (hover/hold). If SOS -> keep paused and report GPS.
+        # If no SOS within a short inspection window -> auto-resume and continue to the current waypoint.
+        self.pause_enable = True
+        self.pause_min_hold_sec = 2.0          # minimum pause time before allowing auto-resume
+        self.pause_max_hold_sec = 8.0          # maximum inspection time if no SOS
+        self.pause_clear_no_person_sec = 1.0   # resume if person disappears for this long (after min_hold)
+        self.pause_hold_hz = 5.0               # how often to send hold commands while paused
+        self.pause_retrigger_cooldown_sec = 5.0   # avoid pause-resume oscillation
+
+        self._pause_lock = threading.Lock()
+        self._pause_requested = False
+        self._pause_reason = None
+        self._pause_started = None
+        self._last_pause_cleared = 0.0
+        self._last_person_seen = 0.0
+
+        # Hold target captured at pause start (prevents altitude jump to takeoff_height)
+        self._pause_hold_lat = None
+        self._pause_hold_lon = None
+        self._pause_hold_alt = None
+
+        # Use FC flight-mode hold for pause (avoid chasing noisy GPS lat/lon setpoints)
+        # Primary: POSHOLD (ArduCopter). Fallback: LOITER.
+        self.pause_hold_modes = ["POSHOLD", "LOITER"]
+        self.pause_hold_mode = "POSHOLD"
+        self.pause_resume_mode = "GUIDED"
+        self._pause_prev_mode = None
+        self._pause_mode_active = False
+
+# -------- Telemetry listeners --------
     def _location_listener(self, vehicle, attr_name, value):
         try:
             if not value:
@@ -488,9 +518,25 @@ class DroneController:
                     
                 self.detected_persons = detections[:1] if detections else []
                 self.last_detection_time = current_time
+                # ===== Mission pause trigger (person detected) =====
+                person_now = len(detections) > 0
+                if person_now and self.pause_enable:
+                    try:
+                        if self.vehicle and self.vehicle.armed and self.vehicle.mode.name == "GUIDED":
+                            self.request_pause("person_detected")
+                    except Exception:
+                        pass
+
         # ===== SOS only GPS report =====
                 sos_dets = [d for d in detections if d.get("drowning_state", {}).get("state") == "SOS"]
                 sos_now = len(sos_dets) > 0 
+                if sos_now and self.pause_enable:
+                    # keep paused while SOS
+                    self.request_pause("SOS")
+
+                # Auto-resume policy (only when NOT SOS)
+                self._update_pause_state(person_now=person_now, sos_now=sos_now, now=current_time)
+
 
                 # Detect SOS
                 just_entered_sos = (sos_now and not self._sos_active)
@@ -582,7 +628,326 @@ class DroneController:
             self.person_thread.join(timeout=2.0)
         print("✅ Person detection stopped")
 
+    # -------- Pause / Resume logic (mission) --------
+
+    def request_pause(self, reason="person_detected"):
+        """Request mission pause.
+
+        New logic:
+          - When a person is detected, we pause the mission by switching flight mode
+            from GUIDED -> POSHOLD (fallback LOITER). This lets the flight controller
+            hold position, instead of repeatedly commanding a noisy (lat, lon) setpoint.
+          - If SOS is detected, keep paused and keep reporting GPS (existing SOS logic).
+          - When inspection ends (no SOS), resume by switching back to GUIDED.
+        """
+        if not self.vehicle:
+            return
+
+        now = time.time()
+        with self._pause_lock:
+            # Cooldown to avoid pause-resume oscillation (SOS bypasses cooldown)
+            if str(reason).upper() != "SOS":
+                if (now - float(getattr(self, "_last_pause_cleared", 0.0))) < float(getattr(self, "pause_retrigger_cooldown_sec", 0.0)):
+                    return
+
+            if not self._pause_requested:
+                self._pause_requested = True
+                self._pause_reason = str(reason) if reason is not None else None
+                self._pause_started = now
+                try:
+                    self._pause_prev_mode = self.vehicle.mode.name if getattr(self.vehicle, "mode", None) else None
+                except Exception:
+                    self._pause_prev_mode = None
+                self._pause_mode_active = False
+
+                # Legacy hold target is kept for fallback, but not used in POSHOLD/LOITER logic
+                self._pause_hold_lat = None
+                self._pause_hold_lon = None
+                self._pause_hold_alt = None
+
+                print(f"⏸️ Mission PAUSE requested: {self._pause_reason}")
+            else:
+                # Escalate reason to SOS if needed
+                if str(reason).upper() == "SOS" and (self._pause_reason != "SOS"):
+                    self._pause_reason = "SOS"
+                    print("⏸️ Mission PAUSE escalated: SOS")
+
+    def clear_pause(self):
+        """Clear pause request and restore GUIDED if needed."""
+        need_resume = False
+        with self._pause_lock:
+            if self._pause_requested:
+                self._pause_requested = False
+                self._pause_reason = None
+                self._pause_started = None
+                self._last_pause_cleared = time.time()
+
+                self._pause_hold_lat = None
+                self._pause_hold_lon = None
+                self._pause_hold_alt = None
+
+                self._pause_prev_mode = None
+                self._pause_mode_active = False
+                need_resume = True
+
+        if need_resume:
+            # Ensure we return to GUIDED to continue mission
+            self._resume_to_guided_if_needed()
+            print("▶️ Mission RESUME (clear)")
+
+    def is_pause_requested(self):
+        with self._pause_lock:
+            return bool(self._pause_requested)
+
+    def get_pause_info(self):
+        """Helper for telemetry UI."""
+        with self._pause_lock:
+            paused = bool(self._pause_requested)
+            started = self._pause_started
+            reason = self._pause_reason
+        elapsed = (time.time() - started) if (paused and started) else 0.0
+        return {
+            "mission_paused": paused,
+            "pause_reason": reason,
+            "pause_elapsed": float(elapsed)
+        }
+
+    def _get_current_hold_target(self):
+        """Best-effort current hold target (lat, lon, alt_rel).
+
+        Notes:
+        - Prefer global_relative_frame for altitude (relative-to-home).
+        - Fallback to latest telemetry listener values.
+        - Avoid forcing takeoff_height (prevents altitude jump on pause).
+        """
+        lat = lon = alt = None
+
+        try:
+            loc = self.vehicle.location.global_relative_frame if self.vehicle else None
+            if loc:
+                if getattr(loc, "lat", None) is not None:
+                    lat = float(loc.lat)
+                if getattr(loc, "lon", None) is not None:
+                    lon = float(loc.lon)
+                if getattr(loc, "alt", None) is not None:
+                    alt = float(loc.alt)
+        except Exception:
+            pass
+
+        # Telemetry fallback (listener is usually more stable than direct reads)
+        try:
+            with self._telemetry_lock:
+                if lat is None:
+                    lat = self.latest_telemetry.get("lat")
+                if lon is None:
+                    lon = self.latest_telemetry.get("lon")
+                if alt is None:
+                    alt = self.latest_telemetry.get("alt")
+        except Exception:
+            pass
+
+        return (
+            float(lat) if lat is not None else None,
+            float(lon) if lon is not None else None,
+            float(alt) if alt is not None else None,
+        )
+
+    def _send_global_hold_target(self, lat, lon, alt):
+        """Reinforce hold using SET_POSITION_TARGET_GLOBAL_INT (GLOBAL_RELATIVE_ALT)."""
+        if not self.vehicle:
+            return
+        if lat is None or lon is None or alt is None:
+            return
+        try:
+            type_mask = 0b0000011111111000  # use position only (ignore vel/accel/yaw/yaw_rate)
+            msg = self.vehicle.message_factory.set_position_target_global_int_encode(
+                0, 0, 0,
+                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                type_mask,
+                int(lat * 1e7),
+                int(lon * 1e7),
+                float(alt),
+                0, 0, 0,
+                0, 0, 0,
+                0, 0
+            )
+            self.vehicle.send_mavlink(msg)
+            self.vehicle.flush()
+        except Exception:
+            pass
+
+    def _hold_position_step(self):
+        """Hold current position during mission pause.
+
+        Fix for altitude jump:
+        - Altitude/position is captured ONCE when pause starts (request_pause).
+        - While paused, keep commanding the same (lat, lon, alt) instead of falling back to takeoff_height.
+        """
+        if not self.vehicle:
+            return
+
+        # Always send zero velocity (including vz=0) to stop climbing/descending quickly.
+        try:
+            self.send_local_ned_velocity(0.0, 0.0, 0.0)
+        except Exception:
+            pass
+
+        # Use captured hold target if available; otherwise compute best-effort and cache it.
+        with self._pause_lock:
+            lat = self._pause_hold_lat
+            lon = self._pause_hold_lon
+            alt = self._pause_hold_alt
+
+        if lat is None or lon is None or alt is None:
+            try:
+                clat, clon, calt = self._get_current_hold_target()
+                if lat is None:
+                    lat = clat
+                if lon is None:
+                    lon = clon
+                if alt is None:
+                    alt = calt
+            except Exception:
+                pass
+
+            with self._pause_lock:
+                if self._pause_hold_lat is None and lat is not None:
+                    self._pause_hold_lat = lat
+                if self._pause_hold_lon is None and lon is not None:
+                    self._pause_hold_lon = lon
+                if self._pause_hold_alt is None and alt is not None:
+                    self._pause_hold_alt = alt
+
+        if lat is not None and lon is not None and alt is not None:
+            try:
+                hold = LocationGlobalRelative(float(lat), float(lon), float(alt))
+                self.vehicle.simple_goto(hold, groundspeed=0.0)
+            except Exception:
+                pass
+
+            self._send_global_hold_target(lat, lon, alt)
+
+
+    def _update_pause_state(self, person_now: bool, sos_now: bool, now: float):
+        """Auto-resume policy when paused and no SOS.
+
+        NOTE: SOS state keeps the mission paused (POSHOLD/LOITER).
+        """
+        if not self.pause_enable:
+            return
+
+        # Update last seen time (for gap-based resume)
+        if person_now:
+            with self._pause_lock:
+                self._last_person_seen = float(now)
+
+        should_resume = False
+
+        with self._pause_lock:
+            if not self._pause_requested:
+                return
+
+            # If SOS, keep paused
+            if sos_now:
+                self._pause_reason = "SOS"
+                return
+
+            started = float(self._pause_started or now)
+            elapsed = float(now - started)
+
+            # Enforce minimum hold time
+            if elapsed < float(self.pause_min_hold_sec):
+                return
+
+            last_seen = float(self._last_person_seen or 0.0)
+            no_person_gap = float(now - last_seen) if last_seen > 0 else 1e9
+
+            # Resume if person disappeared for a while OR we already inspected long enough
+            if no_person_gap >= float(self.pause_clear_no_person_sec) or elapsed >= float(self.pause_max_hold_sec):
+                self._pause_requested = False
+                self._pause_reason = None
+                self._pause_started = None
+                self._last_pause_cleared = float(now)
+
+                # Legacy hold target reset
+                self._pause_hold_lat = None
+                self._pause_hold_lon = None
+                self._pause_hold_alt = None
+
+                self._pause_prev_mode = None
+                self._pause_mode_active = False
+                should_resume = True
+
+        if should_resume:
+            self._resume_to_guided_if_needed()
+            print("▶️ Mission RESUME (auto)")
+
+    # -------- Mode helpers (pause/resume) --------
+    def _set_mode(self, mode_name: str, timeout: float = 6.0) -> bool:
+        """Set flight mode and wait until vehicle reports it (best-effort)."""
+        if not self.vehicle:
+            return False
+        try:
+            if getattr(self.vehicle, "mode", None) and self.vehicle.mode.name == mode_name:
+                return True
+        except Exception:
+            pass
+
+        try:
+            self.vehicle.mode = VehicleMode(str(mode_name))
+        except Exception as e:
+            print(f"⚠️ Failed to set mode {mode_name}: {e}")
+            return False
+
+        t0 = time.time()
+        while (time.time() - t0) < float(timeout):
+            try:
+                if self.vehicle.mode.name == mode_name:
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.1)
+        return False
+
+    def _enter_pause_hold_mode(self) -> bool:
+        """Switch to a position-hold mode during pause. Returns True if successful."""
+        if not self.vehicle:
+            return False
+
+        # Already in a hold mode
+        try:
+            cur = self.vehicle.mode.name
+            if cur in (self.pause_hold_modes or []):
+                self.pause_hold_mode = cur
+                with self._pause_lock:
+                    self._pause_mode_active = True
+                return True
+        except Exception:
+            pass
+
+        # Try primary then fallback
+        for m in (self.pause_hold_modes or ["POSHOLD"]):
+            if self._set_mode(m):
+                self.pause_hold_mode = m
+                with self._pause_lock:
+                    self._pause_mode_active = True
+                return True
+
+        return False
+
+    def _resume_to_guided_if_needed(self):
+        """Restore GUIDED after pause so the mission can continue."""
+        if not self.vehicle:
+            return
+        try:
+            if self.vehicle.mode.name != str(self.pause_resume_mode):
+                self._set_mode(str(self.pause_resume_mode))
+        except Exception:
+            pass
+
+
     # -------- MAVLink control --------
+
     def send_local_ned_velocity(self, vx, vy, vz):
         """Send velocity in BODY_OFFSET_NED frame"""
         if not self.vehicle:
@@ -695,10 +1060,9 @@ class DroneController:
         dLon = targetLocation.lon - currentLocation.lon
         return math.sqrt((dLon * dLon) + (dLat * dLat)) * 1.113195e5
     
+
     def goto(self, targetLocation, tolerance=0.6, timeout=60, speed=0.7):
-        """
-        simple_goto với tolerance & timeout nới lỏng, có record vị trí.
-        """
+        """Navigate to a waypoint with pause/resume using POSHOLD/LOITER."""
         if speed < 0.1 or speed > 5.0:
             print(f"Tốc độ {speed} m/s không hợp lệ, đặt về 0.7 m/s")
             speed = 0.7
@@ -706,30 +1070,87 @@ class DroneController:
         if not self.vehicle:
             return False
 
+        # Initial command
         distanceToTargetLocation = self.get_distance_meters(
             targetLocation,
             self.vehicle.location.global_relative_frame
         )
-        self.set_speed(speed)
-        self.vehicle.simple_goto(targetLocation, groundspeed=speed)
-
-        start_dist = distanceToTargetLocation
+        start_dist = float(distanceToTargetLocation)
         start_time = time.time()
 
-        while self.vehicle.mode.name == "GUIDED" and time.time() - start_time < timeout:
-            currentDistance = self.get_distance_meters(
-                targetLocation,
-                self.vehicle.location.global_relative_frame
-            )
-            if currentDistance < max(tolerance, start_dist * 0.01):
-                print("Reached target waypoint")
-                return True
+        try:
+            self._set_mode("GUIDED")
+        except Exception:
+            pass
+
+        try:
+            self.set_speed(speed)
+            self.vehicle.simple_goto(targetLocation, groundspeed=speed)
+        except Exception:
+            pass
+
+        while (time.time() - start_time) < float(timeout):
+            # If user/operator changes to a terminal mode, stop trying
+            try:
+                cur_mode = self.vehicle.mode.name
+                if cur_mode in ("LAND", "RTL"):
+                    print(f"Abort goto: mode={cur_mode}")
+                    return False
+            except Exception:
+                cur_mode = None
+
+            # -------- Pause handling --------
+            if self.is_pause_requested():
+                # Switch to FC hold mode (POSHOLD/LOITER)
+                self._enter_pause_hold_mode()
+
+                pause_t0 = time.time()
+                while self.vehicle and self.vehicle.armed and self.is_pause_requested():
+                    # Keep ensuring we stay in hold mode
+                    try:
+                        if self.vehicle.mode.name not in (self.pause_hold_modes or []):
+                            self._enter_pause_hold_mode()
+                    except Exception:
+                        pass
+                    time.sleep(1.0 / max(1.0, float(self.pause_hold_hz)))
+
+                paused_dur = time.time() - pause_t0
+                start_time += paused_dur  # do not count pause time into timeout
+
+                # Resume navigation to the same target (GUIDED)
+                self._resume_to_guided_if_needed()
+                try:
+                    self.set_speed(speed)
+                    self.vehicle.simple_goto(targetLocation, groundspeed=speed)
+                except Exception:
+                    pass
+                continue
+
+            # If somehow still in hold mode but pause already cleared -> restore GUIDED
+            try:
+                if self.vehicle.mode.name in (self.pause_hold_modes or []):
+                    self._resume_to_guided_if_needed()
+                    self.set_speed(speed)
+                    self.vehicle.simple_goto(targetLocation, groundspeed=speed)
+            except Exception:
+                pass
+
+            # -------- Arrival check --------
+            try:
+                currentDistance = self.get_distance_meters(
+                    targetLocation,
+                    self.vehicle.location.global_relative_frame
+                )
+                if currentDistance < max(float(tolerance), float(start_dist) * 0.01):
+                    print("Reached target waypoint")
+                    return True
+            except Exception:
+                pass
+
             time.sleep(0.02)
 
         print("Timeout reaching waypoint, proceeding anyway")
         return False
-    
-
 
 
     def land(self):
