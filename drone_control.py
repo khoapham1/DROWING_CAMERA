@@ -12,7 +12,6 @@ from collections import deque
 import mediapipe as mp
 from person_detector import PersonDetector
 from drowing_detector import DrowningDetector
-import os
 
 
 # ===================== CAMERA CALIBRATION =====================
@@ -263,33 +262,8 @@ class DroneController:
         self._last_sos_post = 0.0
         self.sos_post_interval = 1
         
-        # PAUSE / RESUME
-        self._pause_lock = threading.Lock()
-        self._pause_last_trigger = 0.0
-        self._pause_hold_s = float(os.getenv("PERSON_HOLD_SECONDS", "10"))  # seconds to hold
-        self._pause_cooldown_s = float(os.getenv("PERSON_HOLD_COOLDOWN_SECONDS", "15"))  # prevent re-trigger spam
-        labels_env = os.getenv("PERSON_HOLD_LABELS", "person_in_water,drowning")
-        self._pause_labels = set([s.strip().lower() for s in labels_env.split(",") if s.strip()])
 
-            # -------- Mission pause / resume (person check) --------
-        # When a person is detected: request pause (hover/hold). If SOS -> keep paused and report GPS.
-        # If no SOS within a short inspection window -> auto-resume and continue to the current waypoint.
-        self.pause_enable = True
-        self.pause_min_hold_sec = 2.0          # minimum pause time before allowing auto-resume
-        self.pause_max_hold_sec = 8.0          # maximum inspection time if no SOS
-        self.pause_clear_no_person_sec = 1.0   # resume if person disappears for this long (after min_hold)
-        self.pause_hold_hz = 5.0               # how often to send hold commands while paused
-        self.pause_retrigger_cooldown_sec = 5.0   # avoid pause-resume oscillation
-
-        self._pause_lock = threading.Lock()
-        self._pause_requested = False
-        self._pause_reason = None
-        self._pause_started = None
-        self._last_pause_cleared = 0.0
-        self._last_person_seen = 0.0
-
-
-# -------- Telemetry listeners --------
+    # -------- Telemetry listeners --------
     def _location_listener(self, vehicle, attr_name, value):
         try:
             if not value:
@@ -514,25 +488,9 @@ class DroneController:
                     
                 self.detected_persons = detections[:1] if detections else []
                 self.last_detection_time = current_time
-                # ===== Mission pause trigger (person detected) =====
-                person_now = len(detections) > 0
-                if person_now and self.pause_enable:
-                    try:
-                        if self.vehicle and self.vehicle.armed and self.vehicle.mode.name == "GUIDED":
-                            self.request_pause("person_detected")
-                    except Exception:
-                        pass
-
         # ===== SOS only GPS report =====
                 sos_dets = [d for d in detections if d.get("drowning_state", {}).get("state") == "SOS"]
                 sos_now = len(sos_dets) > 0 
-                if sos_now and self.pause_enable:
-                    # keep paused while SOS
-                    self.request_pause("SOS")
-
-                # Auto-resume policy (only when NOT SOS)
-                self._update_pause_state(person_now=person_now, sos_now=sos_now, now=current_time)
-
 
                 # Detect SOS
                 just_entered_sos = (sos_now and not self._sos_active)
@@ -622,120 +580,21 @@ class DroneController:
         self.person_running = False
         if self.person_thread:
             self.person_thread.join(timeout=2.0)
-        print("Person detection stopped")
+        print("✅ Person detection stopped")
 
-    # -------- Pause / Resume logic (mission) --------
-    def request_pause(self, reason="person_detected"):
-            if not self.vehicle:
-                return
-            now = time.time()
-            with self._pause_lock:
-                # Cooldown to avoid pause-resume oscillation (SOS bypasses cooldown)
-                if str(reason).upper() != "SOS":
-                    if (now - float(getattr(self, "_last_pause_cleared", 0.0))) < float(getattr(self, "pause_retrigger_cooldown_sec", 0.0)):
-                        return
-
-                if not self._pause_requested:
-                    self._pause_requested = True
-                    self._pause_reason = str(reason) if reason is not None else None
-                    self._pause_started = now
-                    print(f"Mission PAUSE requested: {self._pause_reason}")
-                else:
-                    # Escalate reason to SOS if needed
-                    if str(reason).upper() == "SOS" and (self._pause_reason != "SOS"):
-                        self._pause_reason = "SOS"
-                        print("Mission PAUSE escalated: SOS")
-    def clear_pause(self):
-        with self._pause_lock:
-            if self._pause_requested:
-                self._pause_requested = False
-                self._pause_reason = None
-                self._pause_started = None
-                self._last_pause_cleared = time.time()
-                print("Mission RESUME (no SOS)")
-
-    def is_pause_requested(self):
-        with self._pause_lock:
-            return bool(self._pause_requested)
-    
-    def get_pause_info(self):
-        with self._pause_lock:
-            paused = bool(self._pause_requested)
-            started = self._pause_started
-            reason = self._pause_reason
-        elapsed = (time.time() - started) if (paused and started) else 0.0
-        return {
-            "mission_paused": paused,
-            "pause_reason": reason,
-            "pause_elapsed": float(elapsed)
-        }
-
-    def _hold_position_step(self):
+    # -------- MAVLink control --------
+    def send_local_ned_velocity(self, vx, vy, vz):
+        """Send velocity in BODY_OFFSET_NED frame"""
         if not self.vehicle:
             return
-        try:
-            loc = self.vehicle.location.global_relative_frame
-            if loc and (loc.lat is not None) and (loc.lon is not None):
-                alt = float(loc.alt) if (loc.alt is not None) else float(self.takeoff_height)
-                hold = LocationGlobalRelative(float(loc.lat), float(loc.lon), alt)
-                try:
-                    self.vehicle.simple_goto(hold, groundspeed=0.0)
-                except Exception:
-                    pass
-            try:
-                self.send_local_ned_velocity(0.0, 0.0, 0.0)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    def _update_pause_state(self, person_now: bool, sos_now: bool, now: float):
-        """Auto-resume policy when paused and no SOS."""
-        if not self.pause_enable:
-            return
-
-        if person_now:
-            with self._pause_lock:
-                self._last_person_seen = float(now)
-
-        with self._pause_lock:
-            if not self._pause_requested:
-                return
-
-            # If SOS, keep paused
-            if sos_now:
-                self._pause_reason = "SOS"
-                return
-
-            started = float(self._pause_started or now)
-            elapsed = float(now - started)
-
-            if elapsed < float(self.pause_min_hold_sec):
-                return
-
-            last_seen = float(self._last_person_seen or 0.0)
-            no_person_gap = float(now - last_seen) if last_seen > 0 else 1e9
-
-            if no_person_gap >= float(self.pause_clear_no_person_sec) or elapsed >= float(self.pause_max_hold_sec):
-                self._pause_requested = False
-                self._pause_reason = None
-                self._pause_started = None
-                self._last_pause_cleared = float(now)
-                print("Mission RESUME (auto)")
-
-            # -------- MAVLink control --------
-    def send_local_ned_velocity(self, vx, vy, vz):
         msg = self.vehicle.message_factory.set_position_target_local_ned_encode(
-            0,
-            self.vehicle._master.target_system,
-            self.vehicle._master.target_component,
-            mavutil.mavlink.MAV_FRAME_BODY_NED,
-            1479,
+            0, 0, 0,
+            mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+            0b0000111111000111,  # enable vx, vy, vz
             0, 0, 0,
             vx, vy, vz,
             0, 0, 0,
-            0.0,      # yaw (ignored)
-            0  # yaw_rate USED
+            0, 0
         )
         self.vehicle.send_mavlink(msg)
         self.vehicle.flush()
@@ -836,17 +695,20 @@ class DroneController:
         dLon = targetLocation.lon - currentLocation.lon
         return math.sqrt((dLon * dLon) + (dLat * dLat)) * 1.113195e5
     
-
     def goto(self, targetLocation, tolerance=0.6, timeout=60, speed=0.7):
+        """
+        simple_goto với tolerance & timeout nới lỏng, có record vị trí.
+        """
         if speed < 0.1 or speed > 5.0:
-            print(f"Toc do {speed} m/s khong hop ly, set lai 0.7 m/s")
+            print(f"Tốc độ {speed} m/s không hợp lệ, đặt về 0.7 m/s")
             speed = 0.7
+
         if not self.vehicle:
             return False
-        
 
         distanceToTargetLocation = self.get_distance_meters(
-            targetLocation, self.vehicle.location.global_relative_frame
+            targetLocation,
+            self.vehicle.location.global_relative_frame
         )
         self.set_speed(speed)
         self.vehicle.simple_goto(targetLocation, groundspeed=speed)
@@ -854,54 +716,20 @@ class DroneController:
         start_dist = distanceToTargetLocation
         start_time = time.time()
 
-        # pause-aware timeout
-        pause_accum = 0.0
-        pause_start = None
-
-        while self.vehicle.mode.name == "GUIDED" and self.vehicle.armed:
-            now = time.time()
-
-            elapsed = now - start_time - pause_accum
-            if pause_start is not None:
-                elapsed -= (now - pause_start)
-            if elapsed > timeout:
-                break
-
-            # ===== pause handling =====
-            if self.is_pause_requested():
-                if pause_start is None:
-                    pause_start = now
-                    print(f"[PAUSE] Holding position (reason={self._pause_reason})")
-                self._hold_position_step()
-                time.sleep(1.0 / self.pause_hold_hz)
-                continue
-            else:
-                if pause_start is not None:
-                    pause_accum += (now - pause_start)
-                    pause_start = None
-                    print("[PAUSE] Resume mission")
-                    try:
-                        self.set_speed(speed)
-                        self.vehicle.simple_goto(targetLocation, groundspeed=speed)
-                    except Exception:
-                        pass
-            # normal navigation
+        while self.vehicle.mode.name == "GUIDED" and time.time() - start_time < timeout:
             currentDistance = self.get_distance_meters(
-                targetLocation, self.vehicle.location.global_relative_frame
+                targetLocation,
+                self.vehicle.location.global_relative_frame
             )
-
-            # Record current position
-            current_pos = self.vehicle.location.global_relative_frame
-            if current_pos.lat and current_pos.lon:
-                self.flown_path.append([current_pos.lat, current_pos.lon])
-
             if currentDistance < max(tolerance, start_dist * 0.01):
                 print("Reached target waypoint")
                 return True
-
             time.sleep(0.02)
+
         print("Timeout reaching waypoint, proceeding anyway")
         return False
+    
+
 
 
     def land(self):

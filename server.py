@@ -20,31 +20,7 @@ import datetime
 from threading import Lock
 from drowing_detector import DrowningDetector
 import mediapipe as mp
-import subprocess
-import requests
 
-try:
-    # Chạy Ngrok trong background
-    ngrok_process = subprocess.Popen(['./ngrok', 'http', '5000'])
-    time.sleep(5)  # Tăng thời gian đợi lên 5s để Ngrok khởi động đầy đủ
-
-    # Lấy URL public từ Ngrok API
-    response = requests.get("http://localhost:4040/api/tunnels")
-    data = response.json()
-    public_url = None
-    for tunnel in data['tunnels']:
-        if tunnel['proto'] == 'https':
-            public_url = tunnel['public_url']
-            break
-
-    if public_url:
-        print(f"✅ Ngrok tunnel ready: {public_url}")
-    else:
-        print("⚠️ Failed to get Ngrok URL")
-except Exception as e:
-    print(f"❌ Error starting Ngrok: {e}")
-    # Dừng server nếu Ngrok fail (tùy chọn)
-    # sys.exit(1)
 
 app = Flask(__name__)
 socketio = SocketIO(app, 
@@ -55,7 +31,7 @@ socketio = SocketIO(app,
 
 # Create/connect controller
 try:
-    controller = get_controller(connection_str='/dev/ttyACM0', takeoff_height=4)
+    controller = get_controller(connection_str='/dev/ttyACM0', takeoff_height=3)
     print("✅ Drone controller initialized")
 except Exception as e:
     print(f"❌ Failed to initialize drone controller: {e}")
@@ -159,7 +135,7 @@ def mjpeg_generator():
                 # placeholder
                 placeholder = cv2.imencode('.jpg', np.zeros((480,640,3), np.uint8))[1].tobytes()
                 yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + placeholder + b'\r\n')
-                time.sleep(0.066)  # Giảm FPS xuống ~15 để giảm delay
+                time.sleep(0.033)
                 continue
             
             nparr = np.frombuffer(frame_jpeg, np.uint8)
@@ -168,40 +144,49 @@ def mjpeg_generator():
             if controller:
                 h, w = cv_image.shape[:2]
 
-                # Tối ưu: Chỉ vẽ overlay nếu có detected_persons (giảm tải CPU)
-                if hasattr(controller, 'detected_persons') and controller.detected_persons:
+                if hasattr(controller, 'detected_persons'):
                     for det in controller.detected_persons:
                         if "bbox" not in det:
                             continue
 
                         bbox = det["bbox"]
-                        x1, y1, x2, y2 = map(int, bbox)
+                        x1, y1, x2, y2 = map(int, bbox)                        # Lấy drowning_state từ detection
                         drowning_state = det.get("drowning_state", {})
                         state = drowning_state.get("state", "ACTIVE")
 
+                        # Màu theo trạng thái (giống trong draw_results)
                         colors = {
-                            "ACTIVE": (0, 255, 0),
-                            "FROZEN": (0, 165, 255),
-                            "SOS": (0, 0, 255)
+                            "ACTIVE": (0, 255, 0),    # xanh lá - BGR
+                            "FROZEN": (0, 165, 255),  # vàng cam
+                            "SOS": (0, 0, 255)        # đỏ
                         }
                         color = colors.get(state, (0, 255, 0))
 
+                        # Bounding box
                         cv2.rectangle(cv_image, (x1, y1), (x2, y2), color, 2)
 
+                        # Đường mực nước (nếu có)
                         if "water_level" in drowning_state:
                             water_y = int(drowning_state["water_level"])
                             if 0 <= water_y <= h:
-                                cv2.line(cv_image, (x1, water_y), (x2, water_y), (255, 255, 0), 1, cv2.LINE_AA)
+                                cv2.line(cv_image, (x1, water_y), (x2, water_y),
+                                        (255, 255, 0), 1, cv2.LINE_AA)
 
-                        cv2.putText(cv_image, f"{state}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                        # Text trạng thái + ID
+                        cv2.putText(cv_image, f"{state}",
+                                    (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
+                        # Thời gian SOS nếu đang SOS
                         if state == "SOS" and "sos_duration" in drowning_state:
-                            cv2.putText(cv_image, f"SOS: {drowning_state['sos_duration']:.1f}s", (x1, y1 - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                            cv2.putText(cv_image, f"SOS: {drowning_state['sos_duration']:.1f}s",
+                                        (x1, y1 - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-                # Tối ưu: Chỉ vẽ skeleton nếu có landmarks và detected_persons (giảm tải)
-                if hasattr(controller, 'latest_pose_landmarks') and controller.latest_pose_landmarks and controller.detected_persons:
-                    skeleton_color = (0, 255, 0)
+                # 2. Vẽ skeleton / pose landmarks (từ latest_pose_landmarks)
+                if hasattr(controller, 'latest_pose_landmarks') and controller.latest_pose_landmarks:
+                    # Chọn màu skeleton
+                    skeleton_color = (0, 255, 0)  # xanh lá mặc định
                     if controller.detected_persons:
+                        # Lấy màu từ detection đầu tiên
                         first_det = controller.detected_persons[0]
                         first_state = first_det.get("drowning_state", {}).get("state", "ACTIVE")
                         skeleton_color = colors.get(first_state, (0, 255, 0))
@@ -214,13 +199,16 @@ def mjpeg_generator():
                         mp_draw.DrawingSpec(color=(200, 200, 200), thickness=1, circle_radius=1)
                     )
 
+                    # Vẽ điểm mũi (nose) nổi bật
                     nose = controller.latest_pose_landmarks.landmark[mp_pose.PoseLandmark.NOSE]
-                    if hasattr(nose, 'visibility') and nose.visibility > 0.5:
+                    if hasattr(nose, 'visibility') and nose.visibility > 0.5:  # chỉ vẽ nếu tin cậy
                         nose_x = int(nose.x * w)
                         nose_y = int(nose.y * h)
-                        cv2.circle(cv_image, (nose_x, nose_y), 5, (0, 0, 255), -1)
+                        cv2.circle(cv_image, (nose_x, nose_y), 5, (0, 0, 255), -1)  # đỏ nổi bật
 
-            # Ghi video (giữ nguyên, nhưng resize chỉ khi cần để giảm tải)
+            # ==================== KẾT THÚC OVERLAY ====================
+
+            # Giữ nguyên phần ghi video (nếu recording)
             with recording_lock:
                 if recording and video_writer is not None:
                     try:
@@ -229,18 +217,17 @@ def mjpeg_generator():
                     except:
                         pass
 
-            # Encode JPEG với chất lượng thấp hơn để nhanh hơn
+            # Encode và yield
             ret, jpeg = cv2.imencode('.jpg', cv_image, [
-                int(cv2.IMWRITE_JPEG_QUALITY), 50,  # Giảm từ 88 xuống 70
+                int(cv2.IMWRITE_JPEG_QUALITY), 88,
                 int(cv2.IMWRITE_JPEG_OPTIMIZE), 1
             ])
             if ret:
                 frame_jpeg = jpeg.tobytes()
 
             yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_jpeg + b'\r\n')
-            time.sleep(0.077)  # ~15 FPS, giảm delay mạng
-
+                b'Content-Type: image/jpeg\r\n\r\n' + frame_jpeg + b'\r\n')
+            time.sleep(0.033)  # ~30 FPS
         except Exception as e:
             print(f"Error in mjpeg_generator: {e}")
             time.sleep(0.1)
@@ -550,7 +537,7 @@ def run_mission_in_thread(waypoints):
         try:
             socketio.emit('mission_status', {'status': 'starting', 'waypoints': waypoints})
             if controller:
-                controller.fly_and_precision_land_with_waypoints(waypoints, takeoff_height=4)          
+                controller.fly_and_precision_land_with_waypoints(waypoints, takeoff_height=3)          
                 socketio.emit('mission_status', {'status': 'completed'})
         except Exception as e:
             socketio.emit('mission_status', {'status': 'error', 'error': str(e)})
@@ -617,14 +604,7 @@ def telemetry_loop():
                 
                 # Add person detection count
                 data['person_count'] = len(controller.detected_persons) if hasattr(controller, 'detected_persons') else 0
-
-                # Add mission pause state (for UI)
-                if hasattr(controller, 'get_pause_info'):
-                    try:
-                        data.update(controller.get_pause_info())
-                    except Exception:
-                        pass
-
+                
                 socketio.emit('telemetry', data)
             else:
                 socketio.emit('telemetry', {'connected': False})
