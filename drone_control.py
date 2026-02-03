@@ -251,6 +251,16 @@ class DroneController:
         self.last_detection_time = 0
         self.detection_interval = 0.05  # seconds between processing steps (loop pacing only)
         self.drowing_detector = DrowningDetector(DROWNING_CONFIG)
+
+        # Single persistent track object used by DrowningDetector so its state machine
+        # (ACTIVE/FROZEN/SOS + motion histories) does not reset every frame.
+        # IMPORTANT: We do NOT use past YOLO frames to "keep" person detection.
+        # Person presence is decided per-frame by:
+        #   - fresh YOLO detection in the current frame, OR
+        #   - MediaPipe Pose presence (fallback)
+        class _PersonTrack:
+            pass
+        self._person_track = _PersonTrack()
         # Rate-limit server posting (do NOT block detection loop)
         self.server_post_interval = 2.0
         self._last_server_post = 0.0
@@ -446,6 +456,56 @@ class DroneController:
             cv2.circle(frame, (nose_x, nose_y), 3, (255, 0, 0), -1)
 
 
+    def _bbox_from_pose_landmarks(self, pose_landmarks, w, h):
+        """Build a loose bbox from MediaPipe Pose landmarks (single person).
+
+        Returns [x1,y1,x2,y2] in image pixels or None if not enough valid points.
+        """
+        if pose_landmarks is None:
+            return None
+
+        # Use a subset of stable landmarks (head/shoulders/hips/knees/ankles/wrists)
+        idxs = [0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]
+
+        xs, ys = [], []
+        for i in idxs:
+            try:
+                p = pose_landmarks.landmark[i]
+                # Prefer reasonably visible points (when available)
+                if hasattr(p, 'visibility') and p.visibility is not None and float(p.visibility) < 0.35:
+                    continue
+                x = float(p.x) * float(w)
+                y = float(p.y) * float(h)
+                if not (math.isfinite(x) and math.isfinite(y)):
+                    continue
+                xs.append(x)
+                ys.append(y)
+            except Exception:
+                continue
+
+        if len(xs) < 4 or len(ys) < 4:
+            return None
+
+        x1, x2 = min(xs), max(xs)
+        y1, y2 = min(ys), max(ys)
+
+        bw = max(1.0, x2 - x1)
+        bh = max(1.0, y2 - y1)
+
+        # Pad so bbox covers full body even when some joints are missing
+        pad_x = bw * 0.20 + 15.0
+        pad_y = bh * 0.25 + 20.0
+
+        x1 = int(max(0, x1 - pad_x))
+        y1 = int(max(0, y1 - pad_y))
+        x2 = int(min(w - 1, x2 + pad_x))
+        y2 = int(min(h - 1, y2 + pad_y))
+
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return [x1, y1, x2, y2]
+
+
     def _person_detection_loop(self):
         """Person + Drowning detection loop"""
         while self.person_running:
@@ -472,12 +532,52 @@ class DroneController:
                 if cv_image is None:
                     continue
                 
-                # Phát hiện người bằng YOLO
-                detections = self.person_detector.detect(cv_image)
+                # ------------------------------
+                # PERSON PRESENCE LOGIC (no history)
+                # ------------------------------
+                # Requirement: do NOT keep person detected using previous frames.
+                # Only accept YOLO detections that were UPDATED in the CURRENT frame.
+                # If YOLO misses, we keep "person" only when MediaPipe Pose is present.
+
+                raw_dets = self.person_detector.detect(cv_image)
+                cur_fc = getattr(self.person_detector.tracker, "frame_count", None)
+
+                # Keep only fresh YOLO updates (filter out stale tracks kept by SORT)
+                yolo_fresh = []
+                if cur_fc is not None:
+                    for d in raw_dets:
+                        t = d.get("track_obj", None)
+                        if t is None:
+                            continue
+                        if int(getattr(t, "last_updated_frame", -1)) == int(cur_fc):
+                            yolo_fresh.append(d)
+                else:
+                    yolo_fresh = list(raw_dets or [])
+
+                chosen_bbox = None
+                chosen_source = None
+
+                if yolo_fresh:
+                    chosen_bbox = yolo_fresh[0].get("bbox")
+                    chosen_source = "yolo"
+                elif pose_res.pose_landmarks:
+                    chosen_bbox = self._bbox_from_pose_landmarks(pose_res.pose_landmarks, w, h)
+                    if chosen_bbox is not None:
+                        chosen_source = "mediapipe"
+
+                detections = []
+                if chosen_bbox is not None:
+                    detections = [{
+                        "id": 1,
+                        "bbox": chosen_bbox,
+                        "track_obj": self._person_track,
+                        "source": chosen_source,
+                    }]
+
                 states = {"ACTIVE": 0, "FROZEN": 0, "SOS": 0}
 
                 for det in detections:
-                    track = det["track_obj"]
+                    track = self._person_track
                     bbox = det["bbox"]
                     # Phát hiện đuối nước
                     results = self.drowing_detector.detect(
@@ -796,6 +896,7 @@ class DroneController:
             time.sleep(1)
 
         while self.vehicle.mode.name != 'GUIDED':
+            # self.vehicle.mode = VehicleMode("GUIDED")
             print('Waiting for GUIDED mode...')
             time.sleep(1)
 

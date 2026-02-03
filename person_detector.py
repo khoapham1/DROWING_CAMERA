@@ -59,8 +59,9 @@ class SortTracker:
             else:
                 t.miss += 1
 
-            recent_pose = len(t.pose_history) > 0 and (self.frame_count - t.last_updated_frame) < 10
-            if t.miss <= self.max_miss or recent_pose:
+            # Keep tracks only up to max_miss (no history-based "person present" logic).
+            # Any higher-level persistence (e.g., via MediaPipe Pose) should be done outside.
+            if t.miss <= self.max_miss:
                 updated_tracks.append(t)
 
         for d in detections:
@@ -91,7 +92,8 @@ class PersonDetector:
         img_size=416,
         conf_thres=0.4,
         iou_thres=0.5,
-        detect_interval=5
+        detect_interval=5,
+        max_miss=0
     ):
         self.img_size = img_size
         self.conf_thres = conf_thres
@@ -99,7 +101,8 @@ class PersonDetector:
         self.detect_interval = detect_interval
         self.frame_id = 0
 
-        self.tracker = SortTracker(iou_thres=0.4, max_miss=30)
+        # Default max_miss=0 so we do NOT return stale tracks when YOLO misses.
+        self.tracker = SortTracker(iou_thres=0.4, max_miss=max_miss)
 
         self.session = ort.InferenceSession(
             model_path,
