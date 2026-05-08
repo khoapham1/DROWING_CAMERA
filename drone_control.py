@@ -334,6 +334,9 @@ class DroneController:
         else:
             print("⚠️ Drop disabled: set DROP_PORT or BALL_DROPPER_PORT to enable BallDropper")
 
+        self.drop_mode = os.getenv("DROP_MODE", "manual")  # 'auto' | 'manual'
+        self.drop_center_aligned = False
+
         #SOS send control
         self._sos_active = False
         self._last_sos_post = 0.0
@@ -780,18 +783,35 @@ class DroneController:
         threading.Thread(target=worker, daemon=True).start()
 
     def _maybe_drop_for_sos(self, bbox, frame_w, frame_h, sos_now):
+        center_aligned = bool(
+            sos_now and bbox is not None and
+            self._is_frame_center_inside_bbox(bbox, frame_w, frame_h, margin_px=self._drop_center_required_px)
+        )
+        self.drop_center_aligned = center_aligned
         if not sos_now:
+            self.drop_center_aligned = False
             return
         with self._drop_lock:
             if self._drop_completed or self._drop_in_progress:
                 return
-        if self._is_frame_center_inside_bbox(
-            bbox,
-            frame_w,
-            frame_h,
-            margin_px=self._drop_center_required_px
-        ):
+        if self.drop_mode == 'auto' and center_aligned:
             self._drop_payload_async()
+
+    def trigger_manual_drop(self) -> bool:
+        """Trigger buoy drop from UI (bypasses center-alignment check)."""
+        with self._drop_lock:
+            if self._drop_completed or self._drop_in_progress:
+                print("Drop already done or in progress")
+                return False
+        print("MANUAL DROP triggered from UI")
+        self._drop_payload_async()
+        return True
+
+    def set_drop_mode(self, mode: str):
+        """Switch drop mode: 'auto' drops when SOS+centered, 'manual' requires UI swipe."""
+        if mode in ('auto', 'manual'):
+            self.drop_mode = mode
+            print(f"Drop mode -> {mode}")
 
     def _rearm_drop_if_clear(self, now, person_now):
         if person_now:

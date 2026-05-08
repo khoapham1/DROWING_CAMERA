@@ -622,6 +622,32 @@ def set_speed():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/trigger_manual_drop', methods=['POST'])
+def trigger_manual_drop():
+    try:
+        if not controller:
+            return jsonify({'error': 'Controller not available'}), 500
+        success = controller.trigger_manual_drop()
+        if success:
+            return jsonify({'status': 'success'})
+        return jsonify({'error': 'Drop not available (already done or in progress)'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/set_drop_mode', methods=['POST'])
+def set_drop_mode():
+    try:
+        if not controller:
+            return jsonify({'error': 'Controller not available'}), 500
+        payload = request.get_json(silent=True) or {}
+        mode = payload.get('mode', 'manual')
+        if mode not in ('auto', 'manual'):
+            return jsonify({'error': 'mode must be "auto" or "manual"'}), 400
+        controller.set_drop_mode(mode)
+        return jsonify({'status': 'success', 'mode': mode})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/recordings/<path:filename>', methods=['GET'])
 def download_recording(filename):
     try:
@@ -721,6 +747,18 @@ def telemetry_loop():
                         data.update(controller.get_pause_info())
                     except Exception:
                         pass
+
+                # Drop state for swipe/auto-drop UI
+                try:
+                    with controller._drop_lock:
+                        drop_done = bool(controller._drop_completed)
+                        drop_busy = bool(controller._drop_in_progress)
+                    data['drop_mode'] = str(getattr(controller, 'drop_mode', 'manual'))
+                    data['drop_ready'] = not drop_done and not drop_busy
+                    data['sos_active'] = bool(getattr(controller, '_sos_active', False))
+                    data['drop_center_aligned'] = bool(getattr(controller, 'drop_center_aligned', False))
+                except Exception:
+                    pass
 
                 socketio.emit('telemetry', data)
             else:

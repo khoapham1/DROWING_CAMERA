@@ -890,8 +890,196 @@
         .state-warning { color: #fbbf24; font-weight: 800; }
         .state-sos { color: #fecaca; font-weight: 900; animation: textBlink 1s infinite; }
 
+        /* SOS marker permanent tooltip */
+        .sos-label {
+            background: rgba(185, 28, 28, 0.92) !important;
+            border: none !important;
+            border-radius: 4px !important;
+            color: #fff !important;
+            font-size: 11px !important;
+            font-weight: 800 !important;
+            padding: 2px 6px !important;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.4) !important;
+            white-space: nowrap;
+        }
+        .sos-label::before { border-top-color: rgba(185, 28, 28, 0.92) !important; }
+
         @keyframes textBlink {
             50% { opacity: 0.46; }
+        }
+
+        /* ---- Drop mode toggle ---- */
+        .sos-title-right {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .drop-mode-row {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .drop-mode-text {
+            color: rgba(255, 255, 255, 0.45);
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            transition: color 0.2s;
+            min-width: 26px;
+        }
+
+        .drop-mode-text.active-mode { color: #fbbf24; }
+
+        .mode-toggle {
+            position: relative;
+            display: inline-block;
+            width: 38px;
+            height: 20px;
+            flex-shrink: 0;
+        }
+
+        .mode-toggle input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+            position: absolute;
+        }
+
+        .mode-slider {
+            position: absolute;
+            inset: 0;
+            border-radius: 10px;
+            background: #2f7df6;
+            cursor: pointer;
+            transition: background 0.25s;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+
+        .mode-slider::before {
+            content: '';
+            position: absolute;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #fff;
+            left: 2px;
+            top: 2px;
+            transition: transform 0.25s;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+        }
+
+        .mode-toggle input:checked + .mode-slider { background: #ef4444; }
+        .mode-toggle input:checked + .mode-slider::before { transform: translateX(18px); }
+
+        /* ---- Swipe-to-drop ---- */
+        .swipe-drop-outer { margin-top: 10px; }
+
+        .swipe-center-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 7px;
+            font-size: 11px;
+            font-weight: 700;
+            color: #94a3b8;
+        }
+
+        .center-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4b5563;
+            flex-shrink: 0;
+            transition: background 0.35s, box-shadow 0.35s;
+        }
+
+        .center-dot.aligned {
+            background: #22c55e;
+            box-shadow: 0 0 7px rgba(34, 197, 94, 0.7);
+        }
+
+        .swipe-track {
+            position: relative;
+            height: 46px;
+            border-radius: 23px;
+            background: rgba(239, 68, 68, 0.12);
+            border: 2px solid rgba(239, 68, 68, 0.38);
+            overflow: hidden;
+            user-select: none;
+            touch-action: none;
+            transition: border-color 0.3s, box-shadow 0.3s;
+        }
+
+        .swipe-track.center-ready {
+            border-color: rgba(239, 68, 68, 0.82);
+            box-shadow: 0 0 10px rgba(239, 68, 68, 0.32);
+        }
+
+        .swipe-fill {
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 0%;
+            background: linear-gradient(90deg, rgba(239, 68, 68, 0.3), rgba(239, 68, 68, 0.55));
+            border-radius: 23px;
+            pointer-events: none;
+        }
+
+        .swipe-handle {
+            position: absolute;
+            left: 4px;
+            top: 4px;
+            width: 36px;
+            height: 34px;
+            border-radius: 17px;
+            background: #ef4444;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 900;
+            cursor: grab;
+            z-index: 2;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.38);
+            letter-spacing: -1px;
+        }
+
+        .swipe-handle:active { cursor: grabbing; }
+        .swipe-handle.success { background: #16a34a; }
+
+        .swipe-label {
+            position: absolute;
+            left: 50px;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: rgba(239, 68, 68, 0.8);
+            font-size: 11px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            white-space: nowrap;
+            pointer-events: none;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .swipe-success-msg {
+            margin-top: 7px;
+            padding: 6px 10px;
+            border-radius: 6px;
+            background: rgba(22, 163, 74, 0.2);
+            border: 1px solid rgba(22, 163, 74, 0.45);
+            color: #86efac;
+            font-size: 12px;
+            font-weight: 700;
+            text-align: center;
+            display: none;
         }
 
         @media (max-width: 1120px) {
@@ -1075,9 +1263,31 @@
         <section class="alert-panel" id="sos-panel">
             <div class="panel-title">
                 <span>SOS Notification</span>
-                <span id="sos-state">STANDBY</span>
+                <div class="sos-title-right">
+                    <div class="drop-mode-row" title="Toggle AUTO / MANUAL drop">
+                        <span class="drop-mode-text active-mode" id="drop-label-manual">MAN</span>
+                        <label class="mode-toggle">
+                            <input type="checkbox" id="drop-mode-toggle">
+                            <span class="mode-slider"></span>
+                        </label>
+                        <span class="drop-mode-text" id="drop-label-auto">AUTO</span>
+                    </div>
+                    <span id="sos-state">STANDBY</span>
+                </div>
             </div>
             <div id="detection-info">No person detections yet</div>
+            <div id="swipe-drop-container" class="swipe-drop-outer" style="display:none;">
+                <div class="swipe-center-status">
+                    <div class="center-dot" id="center-dot"></div>
+                    <span id="center-status-text">Centering drone over person...</span>
+                </div>
+                <div class="swipe-track" id="swipe-drop-track">
+                    <div class="swipe-fill" id="swipe-fill"></div>
+                    <div class="swipe-handle" id="swipe-handle">&#9654;&#9654;</div>
+                    <span class="swipe-label">SLIDE TO RELEASE BUOY</span>
+                </div>
+                <div class="swipe-success-msg" id="swipe-success-msg">Buoy released — mission resuming</div>
+            </div>
         </section>
 
         <section class="control-panel">
@@ -1182,7 +1392,9 @@
     let clientDistanceTraveled = 0;
     let detectionMarkers = new Map();
     let detectionLayer = L.layerGroup().addTo(map);
-    let sosMarker = null;
+    const sosMarkers = [];   // all SOS circle markers on the map
+    const sosPositions = []; // [{lat, lon}] for dedup
+    let sosCount = 0;
     let savedPathPolyline = null;
     let savedPathMarkers = [];
     const savedPathsKey = 'drone_saved_flight_paths_v1';
@@ -1811,35 +2023,73 @@
         sosState.textContent = active ? (label || 'SOS') : 'STANDBY';
     }
 
-    function addPersonDetectionMarker(lat, lon, count, timestamp) {
-        const popup = `
-            <b>SOS / Person Detection</b><br>
-            Count: ${count}<br>
-            Lat: ${lat.toFixed(6)}<br>
-            Lon: ${lon.toFixed(6)}<br>
-            Time: ${new Date(timestamp * 1000).toLocaleTimeString()}
-        `;
+    const SOS_DEDUP_METERS = 12; // positions within this range = same person
 
-        if (!sosMarker) {
-            sosMarker = L.circleMarker([lat, lon], {
-                radius: 16,
-                fillColor: '#ef4444',
-                color: '#fff',
-                weight: 3,
-                opacity: 1,
-                fillOpacity: 0.78
-            }).addTo(detectionLayer);
+    function addPersonDetectionMarker(lat, lon, count, timestamp) {
+        const timeStr = new Date(timestamp * 1000).toLocaleTimeString();
+
+        // Check if this position duplicates an existing SOS marker
+        let matchIdx = -1;
+        for (let i = 0; i < sosPositions.length; i++) {
+            const d = distanceMeters([sosPositions[i].lat, sosPositions[i].lon], [lat, lon]);
+            if (d < SOS_DEDUP_METERS) { matchIdx = i; break; }
         }
 
-        sosMarker.setLatLng([lat, lon]);
-        sosMarker.setRadius(16);
-        sosMarker.bindPopup(popup);
+        if (matchIdx !== -1) {
+            // Same position — refresh popup of the existing marker, keep it highlighted
+            const existing = sosMarkers[matchIdx];
+            existing.bindPopup(
+                `<b>SOS #${matchIdx + 1}</b><br>` +
+                `Count: ${count}<br>` +
+                `Lat: ${lat.toFixed(6)}<br>Lon: ${lon.toFixed(6)}<br>` +
+                `Last seen: ${timeStr}`
+            );
+            // Ensure it stays fully visible (in case it was dimmed)
+            existing.setStyle({ fillColor: '#ef4444', fillOpacity: 0.88, radius: 18 });
+            return;
+        }
+
+        // New distinct SOS position — dim all existing markers first
+        sosMarkers.forEach((m, i) => {
+            m.setStyle({ fillColor: '#b91c1c', fillOpacity: 0.5, radius: 11, weight: 2 });
+        });
+
+        sosCount++;
+        const idx = sosCount;
+
+        const marker = L.circleMarker([lat, lon], {
+            radius: 18,
+            fillColor: '#ef4444',
+            color: '#fff',
+            weight: 3,
+            opacity: 1,
+            fillOpacity: 0.88
+        }).addTo(detectionLayer);
+
+        marker.bindPopup(
+            `<b>SOS #${idx}</b><br>` +
+            `Count: ${count}<br>` +
+            `Lat: ${lat.toFixed(6)}<br>Lon: ${lon.toFixed(6)}<br>` +
+            `Time: ${timeStr}`
+        );
+
+        marker.bindTooltip(`SOS #${idx}`, {
+            permanent: true,
+            direction: 'top',
+            offset: [0, -22],
+            className: 'sos-label'
+        });
+
+        sosMarkers.push(marker);
+        sosPositions.push({ lat, lon });
     }
 
     function clearDetectionUi() {
         detectionLayer.clearLayers();
         detectionMarkers.clear();
-        sosMarker = null;
+        sosMarkers.length = 0;
+        sosPositions.length = 0;
+        sosCount = 0;
         document.getElementById('person-count').textContent = '0';
         document.getElementById('detection-info').innerHTML = 'No person detections yet';
         setSosActive(false);
@@ -1852,6 +2102,7 @@
         }
 
         updateConnectionState(Boolean(data.connected));
+        updateDropTelemetry(data);
 
         if (data.lat && data.lon) {
             const droneLatLng = [data.lat, data.lon];
@@ -2022,6 +2273,153 @@
             }
         }
     });
+
+    // ===================== DROP MODE & SWIPE TO DROP =====================
+    const dropModeToggle = document.getElementById('drop-mode-toggle');
+    const swipeContainer = document.getElementById('swipe-drop-container');
+    const swipeTrack = document.getElementById('swipe-drop-track');
+    const swipeFill = document.getElementById('swipe-fill');
+    const swipeHandle = document.getElementById('swipe-handle');
+    const swipeSuccessMsg = document.getElementById('swipe-success-msg');
+    const centerDot = document.getElementById('center-dot');
+    const centerStatusText = document.getElementById('center-status-text');
+    const dropLabelManual = document.getElementById('drop-label-manual');
+    const dropLabelAuto = document.getElementById('drop-label-auto');
+
+    let swipeDragging = false;
+    let swipeOriginX = 0;
+    let swipeMaxX = 0;
+    let _dropMode = 'manual';
+    let _sosActive = false;
+    let _dropReady = true;
+
+    function getPointerX(e) {
+        return e.touches ? e.touches[0].clientX : e.clientX;
+    }
+
+    swipeHandle.addEventListener('mousedown', onSwipeStart);
+    swipeHandle.addEventListener('touchstart', onSwipeStart, { passive: true });
+
+    function onSwipeStart(e) {
+        if (swipeSuccessMsg.style.display === 'block') return;
+        swipeDragging = true;
+        swipeMaxX = swipeTrack.clientWidth - swipeHandle.offsetWidth - 8;
+        swipeOriginX = getPointerX(e) - (parseInt(swipeHandle.style.left) || 4);
+        swipeHandle.style.transition = 'none';
+        swipeFill.style.transition = 'none';
+    }
+
+    document.addEventListener('mousemove', onSwipeMove);
+    document.addEventListener('touchmove', onSwipeMove, { passive: false });
+
+    function onSwipeMove(e) {
+        if (!swipeDragging) return;
+        if (e.cancelable) e.preventDefault();
+        const raw = getPointerX(e) - swipeOriginX;
+        const x = Math.max(4, Math.min(swipeMaxX + 4, raw));
+        const progress = (x - 4) / Math.max(1, swipeMaxX);
+        swipeHandle.style.left = x + 'px';
+        swipeFill.style.width = (progress * 100) + '%';
+        swipeHandle.innerHTML = progress > 0.65 ? '&#10003;' : '&#9654;&#9654;';
+        if (progress >= 0.95) {
+            swipeDragging = false;
+            executeManualDrop();
+        }
+    }
+
+    document.addEventListener('mouseup', onSwipeEnd);
+    document.addEventListener('touchend', onSwipeEnd);
+
+    function onSwipeEnd() {
+        if (!swipeDragging) return;
+        swipeDragging = false;
+        resetSwipeHandle();
+    }
+
+    function resetSwipeHandle() {
+        swipeHandle.style.transition = 'left 0.35s cubic-bezier(0.4,0,0.2,1)';
+        swipeFill.style.transition = 'width 0.35s cubic-bezier(0.4,0,0.2,1)';
+        swipeHandle.style.left = '4px';
+        swipeFill.style.width = '0%';
+        swipeHandle.innerHTML = '&#9654;&#9654;';
+    }
+
+    function executeManualDrop() {
+        swipeHandle.style.transition = 'left 0.15s ease, background 0.15s ease';
+        swipeHandle.style.left = (swipeMaxX + 4) + 'px';
+        swipeFill.style.width = '100%';
+        swipeHandle.innerHTML = '&#10003;';
+        swipeHandle.classList.add('success');
+
+        fetch('/trigger_manual_drop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'success') {
+                swipeSuccessMsg.style.display = 'block';
+                setTimeout(() => {
+                    swipeSuccessMsg.style.display = 'none';
+                    swipeHandle.classList.remove('success');
+                    resetSwipeHandle();
+                }, 3000);
+            } else {
+                alert('Drop failed: ' + (data.error || 'Unknown error'));
+                swipeHandle.classList.remove('success');
+                resetSwipeHandle();
+            }
+        })
+        .catch(() => {
+            alert('Network error when triggering drop');
+            swipeHandle.classList.remove('success');
+            resetSwipeHandle();
+        });
+    }
+
+    function applyDropModeUI(mode) {
+        _dropMode = mode;
+        const isAuto = (mode === 'auto');
+        dropModeToggle.checked = isAuto;
+        dropLabelManual.classList.toggle('active-mode', !isAuto);
+        dropLabelAuto.classList.toggle('active-mode', isAuto);
+        refreshSwipeVisibility();
+    }
+
+    dropModeToggle.addEventListener('change', function () {
+        const mode = this.checked ? 'auto' : 'manual';
+        applyDropModeUI(mode);
+        fetch('/set_drop_mode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode })
+        }).catch(() => {});
+    });
+
+    function refreshSwipeVisibility() {
+        const show = _sosActive && _dropMode === 'manual' && _dropReady;
+        swipeContainer.style.display = show ? 'block' : 'none';
+        if (!show && swipeSuccessMsg.style.display !== 'block') {
+            resetSwipeHandle();
+        }
+    }
+
+    function updateDropTelemetry(data) {
+        if (data.drop_mode !== undefined) applyDropModeUI(data.drop_mode);
+        if (data.sos_active !== undefined) _sosActive = Boolean(data.sos_active);
+        if (data.drop_ready !== undefined) _dropReady = Boolean(data.drop_ready);
+        if (data.drop_center_aligned !== undefined) {
+            const aligned = Boolean(data.drop_center_aligned);
+            if (centerDot) centerDot.classList.toggle('aligned', aligned);
+            if (centerStatusText) {
+                centerStatusText.textContent = aligned
+                    ? 'Drone centered — ready to drop'
+                    : 'Centering drone over person...';
+            }
+            if (swipeTrack) swipeTrack.classList.toggle('center-ready', aligned);
+        }
+        refreshSwipeVisibility();
+    }
 
     refreshPointInfo();
     renderSavedPaths();
