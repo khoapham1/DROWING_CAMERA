@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, send_from_directory
 from flask_socketio import SocketIO, emit
 import threading
 import time
@@ -55,7 +55,9 @@ socketio = SocketIO(app,
 
 # Create/connect controller
 try:
-    controller = get_controller(connection_str='/dev/ttyACM0', takeoff_height=8)
+    # controller = get_controller(connection_str='/dev/ttyACM0', takeoff_height=8)
+    controller = get_controller(connection_str='tcp:127.0.0.1:5763', takeoff_height=8)
+
     print("✅ Drone controller initialized")
 except Exception as e:
     print(f"❌ Failed to initialize drone controller: {e}")
@@ -74,6 +76,11 @@ recording = False
 recording_lock = Lock()
 video_writer = None
 recording_start_time = None
+
+stream_fps_lock = Lock()
+stream_frame_count = 0
+stream_fps = 0.0
+stream_fps_last_time = time.time()
 
 # Person detection storage
 person_detections = {}
@@ -149,8 +156,20 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
+def update_stream_fps():
+    global stream_frame_count, stream_fps, stream_fps_last_time
+
+    with stream_fps_lock:
+        stream_frame_count += 1
+        now = time.time()
+        elapsed = now - stream_fps_last_time
+        if elapsed >= 1.0:
+            stream_fps = stream_frame_count / elapsed
+            stream_frame_count = 0
+            stream_fps_last_time = now
+
 def mjpeg_generator():
-    global recording, video_writer
+    global recording, video_writer, stream_frame_count, stream_fps, stream_fps_last_time
     
     while True:
         try:
@@ -158,16 +177,28 @@ def mjpeg_generator():
             if frame_jpeg is None:
                 # placeholder
                 placeholder = cv2.imencode('.jpg', np.zeros((480,640,3), np.uint8))[1].tobytes()
+                update_stream_fps()
                 yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + placeholder + b'\r\n')
                 time.sleep(0.066)  # Giảm FPS xuống ~15 để giảm delay
                 continue
             
             nparr = np.frombuffer(frame_jpeg, np.uint8)
             cv_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if cv_image is None:
+                time.sleep(0.02)
+                continue
+            h, w = cv_image.shape[:2]
+            frame_cx = w // 2
+            frame_cy = h // 2
+
+            # Drone frame center crosshair for visual centering.
+            cv2.line(cv_image, (frame_cx - 34, frame_cy), (frame_cx + 34, frame_cy), (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.line(cv_image, (frame_cx, frame_cy - 34), (frame_cx, frame_cy + 34), (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.circle(cv_image, (frame_cx, frame_cy), 5, (0, 0, 255), -1, cv2.LINE_AA)
+            cv2.putText(cv_image, "FRAME CENTER", (frame_cx + 12, frame_cy - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
             
             if controller:
-                h, w = cv_image.shape[:2]
-
                 # Tối ưu: Chỉ vẽ overlay nếu có detected_persons (giảm tải CPU)
                 if hasattr(controller, 'detected_persons') and controller.detected_persons:
                     for det in controller.detected_persons:
@@ -195,8 +226,24 @@ def mjpeg_generator():
 
                         cv2.putText(cv_image, f"{state}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
+                        cx = int((x1 + x2) * 0.5)
+                        cy = int((y1 + y2) * 0.5)
+                        cv2.circle(cv_image, (cx, cy), 5, color, -1, cv2.LINE_AA)
+                        cv2.line(cv_image, (frame_cx, frame_cy), (cx, cy), color, 1, cv2.LINE_AA)
+
                         if state == "SOS" and "sos_duration" in drowning_state:
                             cv2.putText(cv_image, f"SOS: {drowning_state['sos_duration']:.1f}s", (x1, y1 - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+                        visual_servo = getattr(controller, 'visual_servo_last_command', {}) or {}
+                        if visual_servo.get("active"):
+                            debug_text = (
+                                f"ex:{visual_servo.get('ex', 0.0):.0f} "
+                                f"ey:{visual_servo.get('ey', 0.0):.0f} "
+                                f"vx:{visual_servo.get('vx', 0.0):.3f} "
+                                f"vy:{visual_servo.get('vy', 0.0):.3f}"
+                            )
+                            cv2.putText(cv_image, debug_text, (12, h - 18),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2, cv2.LINE_AA)
 
                 # Tối ưu: Chỉ vẽ skeleton nếu có landmarks và detected_persons (giảm tải)
                 if hasattr(controller, 'latest_pose_landmarks') and controller.latest_pose_landmarks and controller.detected_persons:
@@ -237,6 +284,7 @@ def mjpeg_generator():
             if ret:
                 frame_jpeg = jpeg.tobytes()
 
+            update_stream_fps()
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_jpeg + b'\r\n')
             time.sleep(0.077)  # ~15 FPS, giảm delay mạng
@@ -527,7 +575,7 @@ def fly_selected():
         run_mission_in_thread(waypoints)
         return jsonify({'status': 'mission_started', 'waypoints': waypoints})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500.
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/return_home', methods=['POST'])
 def return_home():
@@ -557,6 +605,29 @@ def run_mission_in_thread(waypoints):
     t = threading.Thread(target=mission, daemon=True)
     t.start()
     return t
+
+@app.route('/set_speed', methods=['POST'])
+def set_speed():
+    try:
+        if not controller or not controller.vehicle:
+            return jsonify({'error': 'Controller not available'}), 500
+
+        payload = request.get_json(silent=True) or {}
+        speed = float(payload.get('speed', 0.7))
+        if speed <= 0 or speed > 5:
+            return jsonify({'error': 'Speed must be between 0 and 5 m/s'}), 400
+
+        controller.set_speed(speed)
+        return jsonify({'status': 'success', 'speed': speed})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/recordings/<path:filename>', methods=['GET'])
+def download_recording(filename):
+    try:
+        return send_from_directory('recordings', filename, as_attachment=True)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 404
 
 
 # Compass mission endpoints
@@ -617,6 +688,32 @@ def telemetry_loop():
                 
                 # Add person detection count
                 data['person_count'] = len(controller.detected_persons) if hasattr(controller, 'detected_persons') else 0
+                data['armed'] = bool(getattr(controller.vehicle, 'armed', False))
+                data['detection_fps'] = float(getattr(controller, 'detection_fps', 0.0))
+
+                with stream_fps_lock:
+                    data['camera_fps'] = float(stream_fps)
+
+                try:
+                    battery = getattr(controller.vehicle, 'battery', None)
+                    data['battery'] = float(battery.voltage) if battery and battery.voltage is not None else None
+                except Exception:
+                    data['battery'] = None
+
+                try:
+                    gps = getattr(controller.vehicle, 'gps_0', None)
+                    data['gps_satellites'] = int(gps.satellites_visible) if gps and gps.satellites_visible is not None else 0
+                except Exception:
+                    data['gps_satellites'] = 0
+
+                try:
+                    attitude = getattr(controller.vehicle, 'attitude', None)
+                    if attitude:
+                        data['roll'] = math.degrees(float(attitude.roll))
+                        data['pitch'] = math.degrees(float(attitude.pitch))
+                        data['yaw'] = math.degrees(float(attitude.yaw))
+                except Exception:
+                    pass
 
                 # Add mission pause state (for UI)
                 if hasattr(controller, 'get_pause_info'):

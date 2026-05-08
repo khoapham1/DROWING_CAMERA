@@ -14,6 +14,12 @@ from person_detector import PersonDetector
 from drowing_detector import DrowningDetector
 import os
 
+try:
+    from drop import BallDropper
+except Exception as e:
+    BallDropper = None
+    print(f"⚠️ BallDropper not available: {e}")
+
 
 # ===================== CAMERA CALIBRATION =====================
 try:
@@ -38,6 +44,8 @@ _usb_cam = None
 _camera_thread = None
 _camera_running = False
 IMG_SIZE = 320
+DROP_UART_PORT = "/dev/ttyUSB0"
+DROP_TRIGGER_PERCENT = 90
 
 def start_camera(camera_index=0):
     """Start USB camera"""
@@ -252,12 +260,6 @@ class DroneController:
         self.detection_interval = 0.05  # seconds between processing steps (loop pacing only)
         self.drowing_detector = DrowningDetector(DROWNING_CONFIG)
 
-        # Single persistent track object used by DrowningDetector so its state machine
-        # (ACTIVE/FROZEN/SOS + motion histories) does not reset every frame.
-        # IMPORTANT: We do NOT use past YOLO frames to "keep" person detection.
-        # Person presence is decided per-frame by:
-        #   - fresh YOLO detection in the current frame, OR
-        #   - MediaPipe Pose presence (fallback)
         class _PersonTrack:
             pass
         self._person_track = _PersonTrack()
@@ -267,6 +269,70 @@ class DroneController:
         self.latest_pose_landmarks = None
         self.server_post_interval = 2.0 
         self._last_server_post = 0.0
+        self._locked_bbox = None
+        self._locked_bbox_last_seen = 0.0
+        self._bbox_lock_ttl = 0.8
+        self._bbox_smooth_alpha = 0.35
+        self.detection_fps = 0.0
+        self._detection_frame_count = 0
+        self._detection_fps_last_time = time.time()
+        self.PID_X = PIDController(
+            0.0035, 0.0, 0.00000015,
+            max_output=0.08,
+            integral_limit=300,
+            derivative_filter_tau=0.06,
+            derivative_limit=1800
+        )
+        self.PID_Y = PIDController(
+            0.004, 0.0, 0.00000015,
+            max_output=0.1,
+            integral_limit=300,
+            derivative_filter_tau=0.06,
+            derivative_limit=1800
+        )
+        self.visual_servo_enable = True
+        self.visual_servo_deadband_px = 8.0
+        self.visual_servo_target_ttl = 0.8
+        self.visual_servo_no_person_timeout = float(os.getenv("VISUAL_SERVO_NO_PERSON_TIMEOUT", "5.0"))
+        self.visual_servo_lock = threading.Lock()
+        self.visual_servo_target = None
+        self.visual_servo_last_command = {
+            "active": False,
+            "ex": 0.0,
+            "ey": 0.0,
+            "vx": 0.0,
+            "vy": 0.0,
+        }
+        self._visual_servo_no_person_exit_printed = False
+        self._last_pid_debug_print = 0.0
+        self._pid_debug_interval = 0.25
+        self._current_goto_target = None
+        self._current_goto_speed = 0.7
+        self._active_state_start = 0.0
+        self._active_timeout_sec = float(os.getenv("ACTIVE_STATE_TIMEOUT", "5.0"))
+        self._active_exit_cooldown_sec = float(os.getenv("ACTIVE_EXIT_COOLDOWN", "15.0"))
+        self._active_timeout_exit_printed = False
+        self._pause_block_until = 0.0
+        self._drop_completed = False
+        self._drop_in_progress = False
+        self._last_drop_time = 0.0
+        self._drop_rearm_delay = float(os.getenv("DROP_REARM_DELAY_SECONDS", "20"))
+        self._drop_lock = threading.Lock()
+        self._drop_center_required_px = 0.0
+        self._drop_port = DROP_UART_PORT
+        self._drop_baudrate = int(os.getenv("DROP_BAUDRATE", "9600"))
+        self.drop_trigger_percent = float(DROP_TRIGGER_PERCENT)
+
+        self.dropper = None
+        if BallDropper and self._drop_port:
+            try:
+                self.dropper = BallDropper(self._drop_port, self._drop_baudrate, connect_on_init=False)
+                print(f"✅ Ball dropper configured on {self._drop_port} @ {self._drop_baudrate}")
+            except Exception as e:
+                self.dropper = None
+                print(f"⚠️ Ball dropper init failed: {e}")
+        else:
+            print("⚠️ Drop disabled: set DROP_PORT or BALL_DROPPER_PORT to enable BallDropper")
 
         #SOS send control
         self._sos_active = False
@@ -287,7 +353,7 @@ class DroneController:
         self.pause_enable = True
         self.pause_min_hold_sec = 2.0          # minimum pause time before allowing auto-resume
         self.pause_max_hold_sec = 8.0          # maximum inspection time if no SOS
-        self.pause_clear_no_person_sec = 1.0   # resume if person disappears for this long (after min_hold)
+        self.pause_clear_no_person_sec = self.visual_servo_no_person_timeout   # resume if person disappears for this long
         self.pause_hold_hz = 5.0               # how often to send hold commands while paused
         self.pause_retrigger_cooldown_sec = 5.0   # avoid pause-resume oscillation
 
@@ -505,6 +571,236 @@ class DroneController:
             return None
         return [x1, y1, x2, y2]
 
+    def _smooth_and_lock_bbox(self, bbox, now):
+        """Keep a stable single-person bbox so the stream does not jump around."""
+        if bbox is None:
+            if self._locked_bbox is not None and (now - self._locked_bbox_last_seen) <= self._bbox_lock_ttl:
+                return list(self._locked_bbox), "locked"
+            self._locked_bbox = None
+            return None, None
+
+        bbox = [int(round(float(v))) for v in bbox]
+        if self._locked_bbox is None:
+            self._locked_bbox = bbox
+        else:
+            alpha = float(self._bbox_smooth_alpha)
+            self._locked_bbox = [
+                int(round((1.0 - alpha) * old + alpha * new))
+                for old, new in zip(self._locked_bbox, bbox)
+            ]
+        self._locked_bbox_last_seen = now
+        return list(self._locked_bbox), "mediapipe"
+
+    def _update_detection_fps(self, now):
+        self._detection_frame_count += 1
+        elapsed = now - self._detection_fps_last_time
+        if elapsed >= 1.0:
+            self.detection_fps = self._detection_frame_count / elapsed
+            self._detection_frame_count = 0
+            self._detection_fps_last_time = now
+
+    def _update_visual_servo_target(self, bbox, frame_w, frame_h, now):
+        if bbox is None or frame_w <= 0 or frame_h <= 0:
+            return
+
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        bbox_cx = (x1 + x2) * 0.5
+        bbox_cy = (y1 + y2) * 0.5
+        frame_cx = float(frame_w) * 0.5
+        frame_cy = float(frame_h) * 0.5
+        ex = bbox_cx - frame_cx
+        ey = bbox_cy - frame_cy
+
+        with self.visual_servo_lock:
+            self.visual_servo_target = {
+                "bbox": [int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))],
+                "frame_w": int(frame_w),
+                "frame_h": int(frame_h),
+                "ex": float(ex),
+                "ey": float(ey),
+                "updated_at": float(now),
+            }
+
+    def _clear_visual_servo_target_if_stale(self, now):
+        was_active = bool(self.visual_servo_last_command.get("active", False))
+        with self.visual_servo_lock:
+            target = self.visual_servo_target
+            if target and (now - float(target.get("updated_at", 0.0))) <= self.visual_servo_target_ttl:
+                return
+
+            self.visual_servo_target = None
+            self.visual_servo_last_command = {
+                "active": False,
+                "ex": 0.0,
+                "ey": 0.0,
+                "vx": 0.0,
+                "vy": 0.0,
+            }
+        self.PID_X.reset()
+        self.PID_Y.reset()
+        if was_active:
+            self._stop_visual_servo_motion()
+
+    def _stop_visual_servo_motion(self):
+        try:
+            if self.vehicle and self.vehicle.armed and self.vehicle.mode.name == "GUIDED":
+                self.send_local_ned_velocity(0.0, 0.0, 0.0)
+        except Exception:
+            pass
+
+    def _force_exit_visual_servo_to_mission(self, now, reason="no_person_timeout"):
+        with self.visual_servo_lock:
+            self.visual_servo_target = None
+            self.visual_servo_last_command = {
+                "active": False,
+                "ex": 0.0,
+                "ey": 0.0,
+                "pid_ex": 0.0,
+                "pid_ey": 0.0,
+                "vx": 0.0,
+                "vy": 0.0,
+            }
+        self.PID_X.reset()
+        self.PID_Y.reset()
+        self._stop_visual_servo_motion()
+        self.clear_pause()
+        if not self._visual_servo_no_person_exit_printed:
+            print(
+                f"[PID CENTER] exit -> GPS mission resume "
+                f"reason={reason} no_person_timeout={self.visual_servo_no_person_timeout:.1f}s"
+            )
+            self._visual_servo_no_person_exit_printed = True
+
+    def _exit_visual_servo_if_no_person_timeout(self, now, person_now):
+        if person_now:
+            self._visual_servo_no_person_exit_printed = False
+            return
+
+        last_seen = float(getattr(self, "_last_person_seen", 0.0) or 0.0)
+        if last_seen <= 0.0:
+            return
+
+        no_person_gap = float(now - last_seen)
+        if no_person_gap >= float(self.visual_servo_no_person_timeout):
+            # Guard: only call once per person-absence event to prevent repeated
+            # velocity(0,0,0) commands that would override simple_goto on mission resume.
+            if not self._visual_servo_no_person_exit_printed:
+                self._force_exit_visual_servo_to_mission(now)
+
+    def _visual_servo_step(self, now=None):
+        if not self.visual_servo_enable:
+            return False
+        if not self.vehicle:
+            return False
+        try:
+            if not self.vehicle.armed or self.vehicle.mode.name != "GUIDED":
+                return False
+        except Exception:
+            return False
+
+        now = time.time() if now is None else float(now)
+        with self.visual_servo_lock:
+            target = dict(self.visual_servo_target) if self.visual_servo_target else None
+
+        if not target or (now - float(target.get("updated_at", 0.0))) > self.visual_servo_target_ttl:
+            self._clear_visual_servo_target_if_stale(now)
+            return False
+
+        ex = float(target.get("ex", 0.0))
+        ey = float(target.get("ey", 0.0))
+        pid_ex = 0.0 if abs(ex) <= self.visual_servo_deadband_px else self.PID_X.update(ex)
+        pid_ey = 0.0 if abs(ey) <= self.visual_servo_deadband_px else self.PID_Y.update(ey)
+
+        # Downward-facing camera mapping:
+        # bbox below frame center => ey > 0 => move forward in body NED is negative vx.
+        # bbox right of frame center => ex > 0 => move right is positive vy.
+        vx = -pid_ey
+        vy = pid_ex
+
+        self.send_local_ned_velocity(vx, vy, 0.0)
+        with self.visual_servo_lock:
+            self.visual_servo_last_command = {
+                "active": True,
+                "ex": ex,
+                "ey": ey,
+                "pid_ex": float(pid_ex),
+                "pid_ey": float(pid_ey),
+                "vx": float(vx),
+                "vy": float(vy),
+            }
+        if now - self._last_pid_debug_print >= self._pid_debug_interval:
+            print(
+                "[PID CENTER] "
+                f"ex={ex:.1f}px ey={ey:.1f}px "
+                f"pid_x={pid_ex:.4f} pid_y={pid_ey:.4f} "
+                f"vx={vx:.4f} vy={vy:.4f}"
+            )
+            self._last_pid_debug_print = now
+        return True
+
+    def _is_frame_center_inside_bbox(self, bbox, frame_w, frame_h, margin_px=0.0):
+        if bbox is None or frame_w <= 0 or frame_h <= 0:
+            return False
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        cx = float(frame_w) * 0.5
+        cy = float(frame_h) * 0.5
+        return (
+            (x1 - margin_px) <= cx <= (x2 + margin_px) and
+            (y1 - margin_px) <= cy <= (y2 + margin_px)
+        )
+
+    def _drop_payload_async(self):
+        with self._drop_lock:
+            if self._drop_in_progress or self._drop_completed:
+                return
+            self._drop_in_progress = True
+
+        def worker():
+            ok = False
+            try:
+                if not self.dropper:
+                    print("⚠️ DROP skipped: dropper is not configured")
+                    return
+
+                print("🎯 DROP condition met: SOS + frame center inside bbox")
+                ok = bool(self.dropper.mo_tung_cai())
+                print(f"{'✅' if ok else '❌'} DROP command result: {ok}")
+            except Exception as e:
+                print(f"❌ DROP failed: {e}")
+            finally:
+                with self._drop_lock:
+                    self._drop_completed = bool(ok)
+                    if ok:
+                        self._last_drop_time = time.time()
+                    self._drop_in_progress = False
+                if ok:
+                    self._stop_visual_servo_motion()
+                    self.clear_pause()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _maybe_drop_for_sos(self, bbox, frame_w, frame_h, sos_now):
+        if not sos_now:
+            return
+        with self._drop_lock:
+            if self._drop_completed or self._drop_in_progress:
+                return
+        if self._is_frame_center_inside_bbox(
+            bbox,
+            frame_w,
+            frame_h,
+            margin_px=self._drop_center_required_px
+        ):
+            self._drop_payload_async()
+
+    def _rearm_drop_if_clear(self, now, person_now):
+        if person_now:
+            return
+        with self._drop_lock:
+            if self._drop_completed and (now - self._last_drop_time) >= self._drop_rearm_delay:
+                self._drop_completed = False
+                print("✅ DROP gate re-armed for next target")
+
 
     def _person_detection_loop(self):
         """Person + Drowning detection loop"""
@@ -532,38 +828,33 @@ class DroneController:
                 if cv_image is None:
                     continue
                 
-                # ------------------------------
-                # PERSON PRESENCE LOGIC (no history)
-                # ------------------------------
-                # Requirement: do NOT keep person detected using previous frames.
-                # Only accept YOLO detections that were UPDATED in the CURRENT frame.
-                # If YOLO misses, we keep "person" only when MediaPipe Pose is present.
+                # Prefer MediaPipe Pose for the displayed/tracked bbox. It is much
+                # cheaper and more stable after a person is present than repeatedly
+                # switching to fresh YOLO/SORT boxes.
+                pose_bbox = None
+                if pose_res.pose_landmarks:
+                    pose_bbox = self._bbox_from_pose_landmarks(pose_res.pose_landmarks, w, h)
 
-                raw_dets = self.person_detector.detect(cv_image)
-                cur_fc = getattr(self.person_detector.tracker, "frame_count", None)
+                chosen_bbox, chosen_source = self._smooth_and_lock_bbox(pose_bbox, current_time)
 
-                # Keep only fresh YOLO updates (filter out stale tracks kept by SORT)
-                yolo_fresh = []
-                if cur_fc is not None:
-                    for d in raw_dets:
-                        t = d.get("track_obj", None)
-                        if t is None:
-                            continue
-                        if int(getattr(t, "last_updated_frame", -1)) == int(cur_fc):
-                            yolo_fresh.append(d)
-                else:
-                    yolo_fresh = list(raw_dets or [])
+                if chosen_bbox is None:
+                    raw_dets = self.person_detector.detect(cv_image)
+                    cur_fc = getattr(self.person_detector.tracker, "frame_count", None)
 
-                chosen_bbox = None
-                chosen_source = None
+                    yolo_fresh = []
+                    if cur_fc is not None:
+                        for d in raw_dets:
+                            t = d.get("track_obj", None)
+                            if t is None:
+                                continue
+                            if int(getattr(t, "last_updated_frame", -1)) == int(cur_fc):
+                                yolo_fresh.append(d)
+                    else:
+                        yolo_fresh = list(raw_dets or [])
 
-                if yolo_fresh:
-                    chosen_bbox = yolo_fresh[0].get("bbox")
-                    chosen_source = "yolo"
-                elif pose_res.pose_landmarks:
-                    chosen_bbox = self._bbox_from_pose_landmarks(pose_res.pose_landmarks, w, h)
-                    if chosen_bbox is not None:
-                        chosen_source = "mediapipe"
+                    if yolo_fresh:
+                        chosen_bbox, _ = self._smooth_and_lock_bbox(yolo_fresh[0].get("bbox"), current_time)
+                        chosen_source = "yolo_seed"
 
                 detections = []
                 if chosen_bbox is not None:
@@ -579,6 +870,7 @@ class DroneController:
                 for det in detections:
                     track = self._person_track
                     bbox = det["bbox"]
+                    self._update_visual_servo_target(bbox, w, h, current_time)
                     # Phát hiện đuối nước
                     results = self.drowing_detector.detect(
                         track, bbox, pose_res.pose_landmarks, (h, w)
@@ -613,13 +905,18 @@ class DroneController:
                     pass
                     
                 self.detected_persons = detections[:1] if detections else []
+                if detections and not self._drop_completed:
+                    self._visual_servo_step(current_time)
+                if not detections:
+                    self._clear_visual_servo_target_if_stale(current_time)
                 self.last_detection_time = current_time
+                self._update_detection_fps(current_time)
                 # ===== Mission pause trigger (person detected) =====
                 person_now = len(detections) > 0
-                if person_now and self.pause_enable:
+                self._rearm_drop_if_clear(current_time, person_now)
+                if person_now and self.pause_enable and not self._drop_completed:
                     try:
                         if self.vehicle and self.vehicle.armed and self.vehicle.mode.name == "GUIDED":
-                            time.sleep(0.5)
                             self.request_pause("person_detected")
                     except Exception:
                         pass
@@ -627,12 +924,41 @@ class DroneController:
         # ===== SOS only GPS report =====
                 sos_dets = [d for d in detections if d.get("drowning_state", {}).get("state") == "SOS"]
                 sos_now = len(sos_dets) > 0 
-                if sos_now and self.pause_enable:
+                sos_bbox = sos_dets[0].get("bbox") if sos_dets else None
+                if sos_now and self.pause_enable and not self._drop_completed:
                     # keep paused while SOS
                     self.request_pause("SOS")
 
+                self._maybe_drop_for_sos(sos_bbox, w, h, sos_now)
+
+                # ACTIVE state timeout: non-distress person (ACTIVE, not SOS/FROZEN) for
+                # too long → exit PID and continue mission with cooldown on re-pause.
+                if person_now and not sos_now:
+                    first_det_state = (detections[0].get("drowning_state", {}).get("state", "ACTIVE")
+                                       if detections else "ACTIVE")
+                    if first_det_state == "ACTIVE":
+                        if self._active_state_start <= 0.0:
+                            self._active_state_start = current_time
+                        active_dur = current_time - self._active_state_start
+                        if active_dur >= self._active_timeout_sec and not self._active_timeout_exit_printed:
+                            print(f"[ACTIVE TIMEOUT] Person ACTIVE {active_dur:.1f}s → resume mission (non-distress)")
+                            self._active_timeout_exit_printed = True
+                            self._pause_block_until = current_time + self._active_exit_cooldown_sec
+                            self._active_state_start = 0.0
+                            self._force_exit_visual_servo_to_mission(current_time, reason="active_state_timeout")
+                    else:
+                        # FROZEN state: person may be in distress, reset active timer
+                        self._active_state_start = 0.0
+                        self._active_timeout_exit_printed = False
+                else:
+                    # No person detected or SOS active: reset active state timer
+                    self._active_state_start = 0.0
+                    if not person_now:
+                        self._active_timeout_exit_printed = False
+
                 # Auto-resume policy (only when NOT SOS)
                 self._update_pause_state(person_now=person_now, sos_now=sos_now, now=current_time)
+                self._exit_visual_servo_if_no_person_timeout(current_time, person_now)
 
 
                 # Detect SOS
@@ -733,6 +1059,8 @@ class DroneController:
             with self._pause_lock:
                 # Cooldown to avoid pause-resume oscillation (SOS bypasses cooldown)
                 if str(reason).upper() != "SOS":
+                    if now < float(getattr(self, "_pause_block_until", 0.0)):
+                        return
                     if (now - float(getattr(self, "_last_pause_cleared", 0.0))) < float(getattr(self, "pause_retrigger_cooldown_sec", 0.0)):
                         return
 
@@ -754,6 +1082,15 @@ class DroneController:
                 self._pause_started = None
                 self._last_pause_cleared = time.time()
                 print("Mission RESUME (no SOS)")
+        # Re-issue the active goto target immediately so ArduPilot gets a position
+        # command right away, before the goto loop's next 200 ms sleep cycle.
+        try:
+            target = self._current_goto_target
+            speed = float(self._current_goto_speed or 0.7)
+            if target is not None and self.vehicle and self.vehicle.armed:
+                self.vehicle.simple_goto(target, groundspeed=speed)
+        except Exception:
+            pass
 
     def is_pause_requested(self):
         with self._pause_lock:
@@ -768,7 +1105,8 @@ class DroneController:
         return {
             "mission_paused": paused,
             "pause_reason": reason,
-            "pause_elapsed": float(elapsed)
+            "pause_elapsed": float(elapsed),
+            "visual_servo": dict(self.visual_servo_last_command)
         }
 
     def _hold_position_step(self):
@@ -784,7 +1122,8 @@ class DroneController:
                 except Exception:
                     pass
             try:
-                self.send_local_ned_velocity(0.0, 0.0, 0.0)
+                if not self._visual_servo_step():
+                    self.send_local_ned_velocity(0.0, 0.0, 0.0)
             except Exception:
                 pass
         except Exception:
@@ -805,7 +1144,14 @@ class DroneController:
 
             # If SOS, keep paused
             if sos_now:
-                self._pause_reason = "SOS"
+                if not self._drop_completed:
+                    self._pause_reason = "SOS"
+                    return
+                self._pause_requested = False
+                self._pause_reason = None
+                self._pause_started = None
+                self._last_pause_cleared = float(now)
+                print("Mission RESUME after payload drop")
                 return
 
             started = float(self._pause_started or now)
@@ -833,10 +1179,9 @@ class DroneController:
             mavutil.mavlink.MAV_FRAME_BODY_NED,
             1479,
             0, 0, 0,
-            vx, vy, vz,
+            float(vx), float(vy), float(vz),
             0, 0, 0,
-            0.0,      # yaw (ignored)
-            0  # yaw_rate USED
+            0.0, 0,
         )
         self.vehicle.send_mavlink(msg)
         self.vehicle.flush()
@@ -939,13 +1284,15 @@ class DroneController:
         return math.sqrt((dLon * dLon) + (dLat * dLat)) * 1.113195e5
     
 
-    def goto(self, targetLocation, tolerance=0.6, timeout=60, speed=0.7):
+    def goto(self, targetLocation, tolerance=0.7, timeout=60, speed=0.7):
         if speed < 0.1 or speed > 5.0:
             print(f"Toc do {speed} m/s khong hop ly, set lai 0.7 m/s")
             speed = 0.7
         if not self.vehicle:
             return False
-        
+
+        self._current_goto_target = targetLocation
+        self._current_goto_speed = speed
 
         distanceToTargetLocation = self.get_distance_meters(
             targetLocation, self.vehicle.location.global_relative_frame
@@ -999,10 +1346,12 @@ class DroneController:
 
             if currentDistance < max(tolerance, start_dist * 0.01):
                 print("Reached target waypoint")
+                self._current_goto_target = None
                 return True
 
             time.sleep(0.02)
         print("Timeout reaching waypoint, proceeding anyway")
+        self._current_goto_target = None
         return False
 
 
@@ -1015,6 +1364,7 @@ class DroneController:
             print("Landing...")
             time.sleep(1)
         print("✅ Landed successfully")
+
 
     def fly_and_precision_land_with_waypoints(self, waypoints, takeoff_height=4):
         """
@@ -1076,7 +1426,7 @@ class DroneController:
 # ===================== SINGLETON CONTROLLER =====================
 _controller = None
 
-def get_controller(connection_str='/dev/ttyACM0', takeoff_height=5):
+def get_controller(connection_str='tcp:127.0.0.1:5760', takeoff_height=5):
     global _controller
     if _controller is None:
         _controller = DroneController(
