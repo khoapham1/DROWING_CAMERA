@@ -4,7 +4,7 @@ import threading
 import time
 
 from matplotlib.pylab import det
-from drone_control import get_controller, get_lastest_frame
+from drone_control_v2 import get_controller, get_lastest_frame, _draw_hailo_pose_skeleton
 import json
 from planner import run_planner
 from dronekit import VehicleMode, LocationGlobalRelative
@@ -55,8 +55,8 @@ socketio = SocketIO(app,
 
 # Create/connect controller
 try:
-    # controller = get_controller(connection_str='/dev/ttyACM0', takeoff_height=8)
-    controller = get_controller(connection_str='tcp:127.0.0.1:5763', takeoff_height=8)
+    controller = get_controller(connection_str='/dev/ttyAMA0', takeoff_height=5)
+    # controller = get_controller(connection_str='tcp:127.0.0.1:5763', takeoff_height=8)
 
     print("✅ Drone controller initialized")
 except Exception as e:
@@ -89,7 +89,7 @@ person_detections_lock = Lock()
 mp_pose = mp.solutions.pose
 mp_draw = mp.solutions.drawing_utils
 
-# Start image stream
+# Start image stream 
 try:
     if controller:
         controller.start_image_stream()
@@ -246,26 +246,37 @@ def mjpeg_generator():
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2, cv2.LINE_AA)
 
                 # Tối ưu: Chỉ vẽ skeleton nếu có landmarks và detected_persons (giảm tải)
-                if hasattr(controller, 'latest_pose_landmarks') and controller.latest_pose_landmarks and controller.detected_persons:
+                pose_source = getattr(controller, 'latest_pose_source', None)
+                if pose_source and controller.detected_persons:
                     skeleton_color = (0, 255, 0)
-                    if controller.detected_persons:
-                        first_det = controller.detected_persons[0]
-                        first_state = first_det.get("drowning_state", {}).get("state", "ACTIVE")
-                        skeleton_color = colors.get(first_state, (0, 255, 0))
+                    first_det = controller.detected_persons[0]
+                    first_state = first_det.get("drowning_state", {}).get("state", "ACTIVE")
+                    skeleton_color = colors.get(first_state, (0, 255, 0))
 
-                    mp_draw.draw_landmarks(
-                        cv_image,
-                        controller.latest_pose_landmarks,
-                        mp_pose.POSE_CONNECTIONS,
-                        mp_draw.DrawingSpec(color=skeleton_color, thickness=2, circle_radius=2),
-                        mp_draw.DrawingSpec(color=(200, 200, 200), thickness=1, circle_radius=1)
-                    )
+                    if pose_source == "hailo":
+                        coco_points = getattr(controller, 'latest_pose_keypoints', None)
+                        if coco_points:
+                            _draw_hailo_pose_skeleton(cv_image, coco_points, skeleton_color)
+                            nose = coco_points[0] if len(coco_points) > 0 else None
+                            if nose is not None:
+                                nose_x, nose_y, nose_conf = nose
+                                if nose_conf is None or nose_conf > 0.5:
+                                    cv2.circle(cv_image, (int(nose_x), int(nose_y)), 5, (0, 0, 255), -1)
 
-                    nose = controller.latest_pose_landmarks.landmark[mp_pose.PoseLandmark.NOSE]
-                    if hasattr(nose, 'visibility') and nose.visibility > 0.5:
-                        nose_x = int(nose.x * w)
-                        nose_y = int(nose.y * h)
-                        cv2.circle(cv_image, (nose_x, nose_y), 5, (0, 0, 255), -1)
+                    elif pose_source == "mediapipe" and controller.latest_pose_landmarks:
+                        mp_draw.draw_landmarks(
+                            cv_image,
+                            controller.latest_pose_landmarks,
+                            mp_pose.POSE_CONNECTIONS,
+                            mp_draw.DrawingSpec(color=skeleton_color, thickness=2, circle_radius=2),
+                            mp_draw.DrawingSpec(color=(200, 200, 200), thickness=1, circle_radius=1)
+                        )
+
+                        nose = controller.latest_pose_landmarks.landmark[mp_pose.PoseLandmark.NOSE]
+                        if hasattr(nose, 'visibility') and nose.visibility > 0.5:
+                            nose_x = int(nose.x * w)
+                            nose_y = int(nose.y * h)
+                            cv2.circle(cv_image, (nose_x, nose_y), 5, (0, 0, 255), -1)
 
             # Ghi video (giữ nguyên, nhưng resize chỉ khi cần để giảm tải)
             with recording_lock:
@@ -598,7 +609,7 @@ def run_mission_in_thread(waypoints):
         try:
             socketio.emit('mission_status', {'status': 'starting', 'waypoints': waypoints})
             if controller:
-                controller.fly_and_precision_land_with_waypoints(waypoints, takeoff_height=8)          
+                controller.fly_and_precision_land_with_waypoints(waypoints, takeoff_height=5)          
                 socketio.emit('mission_status', {'status': 'completed'})
         except Exception as e:
             socketio.emit('mission_status', {'status': 'error', 'error': str(e)})
@@ -648,12 +659,56 @@ def set_drop_mode():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/set_servo', methods=['POST'])
+def set_servo():
+    """Công tắc OPEN/CLOSE servo thủ công từ UI (độc lập với thả tự động)."""
+    try:
+        if not controller:
+            return jsonify({'error': 'Controller not available'}), 500
+        payload = request.get_json(silent=True) or {}
+        open_servo = bool(payload.get('open', False))
+        ok = controller.set_servo_position(open_servo)
+        if ok:
+            return jsonify({'status': 'success', 'open': open_servo})
+        return jsonify({'error': 'Servo control failed (vehicle not available?)'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/recordings/<path:filename>', methods=['GET'])
 def download_recording(filename):
     try:
         return send_from_directory('recordings', filename, as_attachment=True)
     except Exception as e:
         return jsonify({'error': str(e)}), 404
+
+
+# ===================== OFFLINE MAP TILE CACHE =====================
+TILE_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tile_cache')
+
+@app.route('/tiles/<int:z>/<int:x>/<int:y>.png')
+def get_map_tile(z, x, y):
+    """Cache-first tile proxy: serves a locally cached tile if present
+    (works fully offline), otherwise fetches it from Google Satellite,
+    saves it to the cache, and returns it (works when online)."""
+    tile_dir = os.path.join(TILE_CACHE_DIR, str(z), str(x))
+    tile_path = os.path.join(tile_dir, f'{y}.png')
+
+    if os.path.exists(tile_path):
+        return send_from_directory(tile_dir, f'{y}.png', mimetype='image/png')
+
+    subdomain = ['mt0', 'mt1', 'mt2', 'mt3'][(x + y) % 4]
+    url = f'https://{subdomain}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}'
+    try:
+        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        if resp.status_code == 200 and resp.headers.get('content-type', '').startswith('image'):
+            os.makedirs(tile_dir, exist_ok=True)
+            with open(tile_path, 'wb') as f:
+                f.write(resp.content)
+            return Response(resp.content, mimetype='image/png')
+    except Exception:
+        pass
+    # Offline and not cached: return empty response, Leaflet renders a blank tile
+    return Response(status=204)
 
 
 # Compass mission endpoints

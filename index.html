@@ -1,0 +1,2499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drone Ground Control - Rescue Monitor</title>
+    <link rel="stylesheet" href="/static/leaflet/leaflet.css">
+    <script src="/static/leaflet/leaflet.js"></script>
+    <script src="/static/socket.io.min.js"></script>
+    <style>
+        :root {
+            --panel: rgba(12, 17, 29, 0.88);
+            --panel-strong: rgba(7, 10, 18, 0.94);
+            --panel-soft: rgba(26, 34, 50, 0.82);
+            --border: rgba(226, 232, 240, 0.16);
+            --text: #f8fafc;
+            --muted: #aeb7c6;
+            --blue: #2f7df6;
+            --green: #17b26a;
+            --amber: #f59e0b;
+            --red: #ef4444;
+            --cyan: #22d3ee;
+            --purple: #8b5cf6;
+            --shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
+            --radius: 8px;
+        }
+
+        * { box-sizing: border-box; }
+
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+            background: #020617;
+            color: var(--text);
+            font-family: "Segoe UI", Roboto, Arial, sans-serif;
+            font-size: 15px;
+            letter-spacing: 0;
+        }
+
+        button,
+        select {
+            font: inherit;
+        }
+
+        .mission-shell {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            background: #030712;
+        }
+
+        #map {
+            position: absolute;
+            inset: 0;
+            z-index: 1;
+            background: #0b1120;
+        }
+
+        .leaflet-control-layers,
+        .leaflet-control-zoom {
+            border: 1px solid var(--border) !important;
+            border-radius: var(--radius) !important;
+            box-shadow: var(--shadow) !important;
+            overflow: hidden;
+        }
+
+        .leaflet-control-layers {
+            background: rgba(15, 23, 42, 0.9) !important;
+            color: var(--text);
+        }
+
+        .top-bar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 20;
+            height: 76px;
+            display: grid;
+            grid-template-columns: minmax(260px, 1fr) minmax(500px, 1.6fr) minmax(260px, 1fr);
+            gap: 10px;
+            align-items: center;
+            padding: 8px 14px;
+            background: linear-gradient(90deg, rgba(19, 147, 71, 0.94), rgba(245, 247, 252, 0.94) 32%, rgba(245, 247, 252, 0.94));
+            color: #0f172a;
+            box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+        }
+
+        .brand-status {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 0;
+        }
+
+        .app-mark {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: grid;
+            place-items: center;
+            background: #39227b;
+            color: #fff;
+            font-weight: 900;
+            font-size: 20px;
+            box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.74);
+        }
+
+        .ready-copy {
+            min-width: 0;
+        }
+
+        .ready-title {
+            display: flex;
+            align-items: baseline;
+            gap: 10px;
+            font-size: 28px;
+            line-height: 1.05;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        #top-status {
+            display: inline-flex;
+            align-items: center;
+            min-width: 92px;
+            justify-content: center;
+            padding: 4px 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(22, 163, 74, 0.45);
+            background: rgba(22, 163, 74, 0.16);
+            color: #166534;
+            font-size: 14px;
+            font-weight: 700;
+        }
+
+        .ready-subtitle {
+            margin-top: 4px;
+            font-size: 14px;
+            color: rgba(15, 23, 42, 0.72);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .top-telemetry {
+            display: grid;
+            grid-template-columns: repeat(6, minmax(72px, 1fr));
+            gap: 8px;
+        }
+
+        .top-chip {
+            min-height: 52px;
+            border-radius: var(--radius);
+            display: grid;
+            align-content: center;
+            gap: 2px;
+            padding: 7px 10px;
+            background: rgba(255, 255, 255, 0.7);
+            border: 1px solid rgba(15, 23, 42, 0.12);
+        }
+
+        .top-chip label {
+            color: rgba(15, 23, 42, 0.62);
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .top-chip strong {
+            font-size: 19px;
+            color: #0f172a;
+            line-height: 1;
+            white-space: nowrap;
+        }
+
+        .top-chip.danger strong {
+            color: #b91c1c;
+        }
+
+        .right-brand {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 12px;
+            min-width: 0;
+        }
+
+        .battery-block {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 24px;
+            font-weight: 700;
+        }
+
+        .battery-icon {
+            width: 30px;
+            height: 45px;
+            border: 4px solid #111827;
+            border-radius: 4px;
+            position: relative;
+            background: linear-gradient(to top, #111827 72%, transparent 72%);
+        }
+
+        .battery-icon::before {
+            content: "";
+            position: absolute;
+            top: -9px;
+            left: 7px;
+            width: 10px;
+            height: 5px;
+            border-radius: 2px 2px 0 0;
+            background: #111827;
+        }
+
+        .qgc-badge {
+            min-width: 92px;
+            padding: 8px 10px;
+            border-radius: var(--radius);
+            background: #020617;
+            color: #fff;
+            text-align: center;
+            font-style: italic;
+            font-weight: 900;
+            line-height: 0.95;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.26);
+        }
+
+        .qgc-badge span {
+            display: block;
+            font-size: 11px;
+            font-style: normal;
+            font-weight: 600;
+            color: #cbd5e1;
+        }
+
+        .left-rail {
+            position: absolute;
+            top: 94px;
+            left: 14px;
+            z-index: 18;
+            width: 88px;
+            display: grid;
+            gap: 8px;
+            padding: 8px;
+            border-radius: var(--radius);
+            background: rgba(248, 250, 252, 0.92);
+            color: #0f172a;
+            box-shadow: var(--shadow);
+        }
+
+        .rail-button {
+            min-height: 56px;
+            border: 0;
+            border-radius: 7px;
+            background: transparent;
+            color: #111827;
+            cursor: pointer;
+            display: grid;
+            align-content: center;
+            justify-items: center;
+            gap: 3px;
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .rail-button:hover {
+            background: rgba(47, 125, 246, 0.12);
+        }
+
+        .rail-button span {
+            width: 26px;
+            height: 22px;
+            display: block;
+            position: relative;
+        }
+
+        .icon-route::before,
+        .icon-route::after {
+            content: "";
+            position: absolute;
+            border-radius: 999px;
+            background: #111827;
+        }
+
+        .icon-route::before {
+            width: 5px;
+            height: 5px;
+            top: 0;
+            left: 4px;
+            box-shadow: 16px 13px 0 #111827;
+        }
+
+        .icon-route::after {
+            width: 18px;
+            height: 12px;
+            left: 5px;
+            top: 4px;
+            border: 3px solid #111827;
+            border-left-color: transparent;
+            border-bottom-color: transparent;
+            background: transparent;
+            transform: rotate(35deg);
+        }
+
+        .icon-up::before {
+            content: "";
+            position: absolute;
+            left: 7px;
+            top: 2px;
+            width: 12px;
+            height: 18px;
+            background: #111827;
+            clip-path: polygon(50% 0, 100% 42%, 70% 42%, 70% 100%, 30% 100%, 30% 42%, 0 42%);
+        }
+
+        .icon-home::before {
+            content: "";
+            position: absolute;
+            left: 3px;
+            top: 8px;
+            width: 20px;
+            height: 14px;
+            background: #111827;
+            clip-path: polygon(0 45%, 50% 0, 100% 45%, 86% 45%, 86% 100%, 14% 100%, 14% 45%);
+        }
+
+        .scale-box {
+            position: absolute;
+            top: 96px;
+            left: 118px;
+            z-index: 14;
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            color: #fff;
+            text-shadow: 0 2px 4px #000;
+            font-size: 17px;
+            font-weight: 700;
+        }
+
+        .scale-line {
+            width: 64px;
+            height: 36px;
+            border-left: 2px solid #fff;
+            border-bottom: 2px solid #fff;
+        }
+
+        .video-panel {
+            position: absolute;
+            left: 14px;
+            bottom: 16px;
+            z-index: 17;
+            width: min(42vw, 640px);
+            min-width: 380px;
+            aspect-ratio: 16 / 9;
+            background: rgba(0, 0, 0, 0.72);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: var(--radius);
+            overflow: hidden;
+            box-shadow: var(--shadow);
+        }
+
+        .video-titlebar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 2;
+            height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 10px;
+            background: linear-gradient(to bottom, rgba(0, 0, 0, 0.8), rgba(0, 0, 0, 0));
+            color: #fff;
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        #camera-container {
+            position: absolute;
+            inset: 0;
+        }
+
+        #live-camera {
+            width: 100%;
+            height: 100%;
+            display: block;
+            object-fit: cover;
+            background: #000;
+            cursor: pointer;
+        }
+
+        #zoom-btn {
+            position: absolute;
+            top: 9px;
+            right: 9px;
+            z-index: 4;
+            width: 32px;
+            height: 32px;
+            border: 1px solid rgba(255, 255, 255, 0.38);
+            border-radius: 7px;
+            background: rgba(0, 0, 0, 0.58);
+            color: #fff;
+            cursor: pointer;
+            font-weight: 800;
+        }
+
+        .video-stats {
+            position: absolute;
+            left: 10px;
+            bottom: 10px;
+            z-index: 2;
+            display: flex;
+            gap: 8px;
+        }
+
+        .stat-box {
+            padding: 5px 8px;
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.58);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            color: #cbd5e1;
+            font-size: 13px;
+        }
+
+        .stat-value {
+            color: #fff;
+            font-weight: 800;
+        }
+
+        .right-stack {
+            position: absolute;
+            top: 96px;
+            right: 14px;
+            bottom: 16px;
+            z-index: 16;
+            width: min(388px, 30vw);
+            min-width: 330px;
+            display: grid;
+            grid-template-rows: auto auto minmax(0, 1fr);
+            gap: 10px;
+        }
+
+        .instrument-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .instrument {
+            position: relative;
+            aspect-ratio: 1;
+            border-radius: 50%;
+            background: #f8fafc;
+            border: 8px solid #fff;
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+
+        .horizon-sky {
+            position: absolute;
+            inset: -45%;
+            background: linear-gradient(#2563eb 0 48%, #7c3f11 49% 51%, #4d9f28 52% 100%);
+            transform-origin: center;
+            transition: transform 0.18s linear;
+        }
+
+        .horizon-line {
+            position: absolute;
+            left: 18%;
+            right: 18%;
+            top: 50%;
+            height: 3px;
+            background: #f97316;
+            box-shadow: 0 -22px 0 -1px rgba(255, 255, 255, 0.6), 0 22px 0 -1px rgba(255, 255, 255, 0.6);
+        }
+
+        .aircraft-mark {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 54px;
+            height: 18px;
+            transform: translate(-50%, -50%);
+            border-bottom: 3px solid #7f1d1d;
+        }
+
+        .aircraft-mark::before,
+        .aircraft-mark::after {
+            content: "";
+            position: absolute;
+            top: 8px;
+            width: 17px;
+            height: 3px;
+            background: #7f1d1d;
+        }
+
+        .aircraft-mark::before { left: -12px; }
+        .aircraft-mark::after { right: -12px; }
+
+        .gyro-readout {
+            position: absolute;
+            left: 50%;
+            bottom: 10px;
+            transform: translateX(-50%);
+            min-width: 76px;
+            padding: 4px 6px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.72);
+            color: #1f2937;
+            text-align: center;
+            font-size: 12px;
+            font-weight: 800;
+        }
+
+        .compass-face {
+            position: absolute;
+            inset: 0;
+            border-radius: 50%;
+            background:
+                radial-gradient(circle at center, #fff 0 47%, transparent 48%),
+                repeating-conic-gradient(from 0deg, #111827 0 1.5deg, transparent 1.5deg 15deg);
+        }
+
+        .compass-label {
+            position: absolute;
+            color: #111827;
+            font-size: 17px;
+            font-weight: 800;
+        }
+
+        .north { top: 8px; left: 50%; transform: translateX(-50%); }
+        .east { right: 10px; top: 50%; transform: translateY(-50%); }
+        .south { bottom: 8px; left: 50%; transform: translateX(-50%); }
+        .west { left: 10px; top: 50%; transform: translateY(-50%); }
+
+        #compass-needle {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 112px;
+            height: 34px;
+            transform: translate(-50%, -50%) rotate(0deg);
+            transform-origin: center;
+            transition: transform 0.25s linear;
+        }
+
+        #compass-needle::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            clip-path: polygon(50% 0, 100% 50%, 50% 100%, 58% 50%);
+            background: #dc2626;
+        }
+
+        #compass-needle::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            clip-path: polygon(50% 0, 0 50%, 50% 100%, 42% 50%);
+            background: #ef4444;
+        }
+
+        #compass-value {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            min-width: 48px;
+            padding: 4px 5px;
+            border: 1px solid rgba(15, 23, 42, 0.28);
+            color: #334155;
+            text-align: center;
+            font-size: 12px;
+            background: rgba(255, 255, 255, 0.66);
+        }
+
+        .alert-panel {
+            border-radius: var(--radius);
+            border: 1px solid rgba(34, 197, 94, 0.35);
+            background: rgba(5, 46, 22, 0.86);
+            box-shadow: var(--shadow);
+            padding: 12px;
+            min-height: 98px;
+        }
+
+        .alert-panel.sos-active {
+            border-color: rgba(239, 68, 68, 0.9);
+            background: rgba(69, 10, 10, 0.94);
+            animation: sosPulse 1s infinite;
+        }
+
+        @keyframes sosPulse {
+            50% { box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.32), var(--shadow); }
+        }
+
+        .panel-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            color: #fff;
+            font-size: 14px;
+            font-weight: 800;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+
+        #detection-info {
+            color: #d1fae5;
+            font-size: 14px;
+            line-height: 1.45;
+        }
+
+        .control-panel {
+            min-height: 0;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            background: var(--panel);
+            box-shadow: var(--shadow);
+            overflow: hidden;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr) auto;
+        }
+
+        .control-tabs {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            background: var(--panel-strong);
+        }
+
+        .control-tabs strong {
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+
+        .controls-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+            padding: 12px;
+            overflow: auto;
+        }
+
+        .control-button,
+        .controls-grid button,
+        .controls-grid select {
+            min-height: 42px;
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            border-radius: 7px;
+            color: #fff;
+            background: rgba(47, 125, 246, 0.88);
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 800;
+            text-align: center;
+        }
+
+        .controls-grid button:hover {
+            filter: brightness(1.12);
+        }
+
+        .controls-grid button:disabled {
+            cursor: not-allowed;
+            opacity: 0.48;
+            filter: grayscale(0.4);
+        }
+
+        .controls-grid select {
+            background: rgba(15, 23, 42, 0.86);
+            color: #e5e7eb;
+            padding: 0 8px;
+        }
+
+        .danger-btn { background: #c81e1e !important; }
+        .success-btn { background: #16a34a !important; }
+        .warning-btn { background: #f59e0b !important; color: #111827 !important; }
+        .purple-btn { background: #7c3aed !important; }
+        .cyan-btn { background: #0891b2 !important; }
+
+        #point-info {
+            min-height: 96px;
+            max-height: 150px;
+            overflow: auto;
+            padding: 11px 12px;
+            border-top: 1px solid var(--border);
+            background: rgba(2, 6, 23, 0.55);
+            color: #cbd5e1;
+            font-size: 13px;
+            line-height: 1.45;
+        }
+
+        .path-library {
+            max-height: 172px;
+            overflow: auto;
+            padding: 10px 12px 12px;
+            border-top: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.74);
+        }
+
+        .path-library-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 8px;
+            color: #e5e7eb;
+            font-size: 13px;
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+
+        .path-item {
+            width: 100%;
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 8px;
+            align-items: center;
+            margin-top: 6px;
+            padding: 8px;
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 7px;
+            background: rgba(30, 41, 59, 0.78);
+            color: #e5e7eb;
+            cursor: pointer;
+            text-align: left;
+        }
+
+        .path-item:hover {
+            border-color: rgba(34, 211, 238, 0.65);
+        }
+
+        .path-item strong,
+        .path-item span {
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+
+        .path-item strong {
+            font-size: 13px;
+        }
+
+        .path-item span {
+            color: #aeb7c6;
+            font-size: 12px;
+        }
+
+        .path-delete {
+            min-width: 30px;
+            min-height: 28px;
+            border: 0;
+            border-radius: 6px;
+            background: rgba(239, 68, 68, 0.18);
+            color: #fecaca;
+            cursor: pointer;
+            font-weight: 900;
+        }
+
+        .bottom-hud {
+            position: absolute;
+            left: calc(42vw + 32px);
+            right: calc(min(388px, 30vw) + 30px);
+            bottom: 16px;
+            z-index: 15;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            max-width: 620px;
+        }
+
+        .hud-metric {
+            min-height: 62px;
+            display: grid;
+            align-content: center;
+            gap: 4px;
+            padding: 9px 12px;
+            border-radius: var(--radius);
+            background: rgba(248, 250, 252, 0.78);
+            border: 1px solid rgba(15, 23, 42, 0.12);
+            color: #0f172a;
+            box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+        }
+
+        .hud-metric label {
+            font-size: 12px;
+            color: #475569;
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+
+        .hud-metric span {
+            font-size: 22px;
+            font-weight: 800;
+            white-space: nowrap;
+        }
+
+        .recordings-modal {
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 10000;
+            width: min(560px, calc(100vw - 32px));
+            max-height: min(600px, calc(100vh - 32px));
+            padding: 18px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.98);
+            box-shadow: var(--shadow);
+            color: var(--text);
+        }
+
+        .recordings-modal h3 {
+            margin: 0 0 12px;
+            font-size: 17px;
+        }
+
+        #recordings-list {
+            max-height: 420px;
+            overflow: auto;
+            display: grid;
+            gap: 8px;
+            font-size: 14px;
+        }
+
+        #recordings-list > div {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 10px;
+            border-radius: 7px;
+            border: 1px solid var(--border);
+            background: rgba(30, 41, 59, 0.82);
+        }
+
+        #modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            background: rgba(2, 6, 23, 0.7);
+            backdrop-filter: blur(3px);
+        }
+
+        #close-recordings {
+            float: right;
+            margin-top: 14px;
+            min-height: 36px;
+            padding: 0 16px;
+            border: 0;
+            border-radius: 7px;
+            background: #dc2626;
+            color: #fff;
+            cursor: pointer;
+            font-weight: 800;
+        }
+
+        .point-marker {
+            width: 27px;
+            height: 27px;
+            border-radius: 50%;
+            display: grid;
+            place-items: center;
+            background: #13b7d8;
+            color: #03151c;
+            border: 2px solid #fff;
+            box-shadow: 0 3px 8px rgba(0, 0, 0, 0.45);
+            font-size: 13px;
+            font-weight: 900;
+        }
+
+        .custom-div-icon {
+            background: transparent;
+            border: 0;
+        }
+
+        .state-active { color: #86efac; font-weight: 800; }
+        .state-warning { color: #fbbf24; font-weight: 800; }
+        .state-sos { color: #fecaca; font-weight: 900; animation: textBlink 1s infinite; }
+
+        /* SOS marker permanent tooltip */
+        .sos-label {
+            background: rgba(185, 28, 28, 0.92) !important;
+            border: none !important;
+            border-radius: 4px !important;
+            color: #fff !important;
+            font-size: 11px !important;
+            font-weight: 800 !important;
+            padding: 2px 6px !important;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.4) !important;
+            white-space: nowrap;
+        }
+        .sos-label::before { border-top-color: rgba(185, 28, 28, 0.92) !important; }
+
+        @keyframes textBlink {
+            50% { opacity: 0.46; }
+        }
+
+        /* ---- Drop mode toggle ---- */
+        .sos-title-right {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .drop-mode-row {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        /* Manual servo toggle row (full width inside controls grid) */
+        .servo-control-row {
+            grid-column: 1 / -1;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            min-height: 42px;
+            padding: 6px 12px;
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            border-radius: 7px;
+            background: rgba(15, 23, 42, 0.6);
+        }
+
+        .servo-control-title {
+            font-size: 13px;
+            font-weight: 800;
+            color: #fff;
+            text-transform: uppercase;
+        }
+
+        .drop-mode-text {
+            color: rgba(255, 255, 255, 0.45);
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            transition: color 0.2s;
+            min-width: 26px;
+        }
+
+        .drop-mode-text.active-mode { color: #fbbf24; }
+
+        .mode-toggle {
+            position: relative;
+            display: inline-block;
+            width: 38px;
+            height: 20px;
+            flex-shrink: 0;
+        }
+
+        .mode-toggle input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+            position: absolute;
+        }
+
+        .mode-slider {
+            position: absolute;
+            inset: 0;
+            border-radius: 10px;
+            background: #2f7df6;
+            cursor: pointer;
+            transition: background 0.25s;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+
+        .mode-slider::before {
+            content: '';
+            position: absolute;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #fff;
+            left: 2px;
+            top: 2px;
+            transition: transform 0.25s;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+        }
+
+        .mode-toggle input:checked + .mode-slider { background: #ef4444; }
+        .mode-toggle input:checked + .mode-slider::before { transform: translateX(18px); }
+
+        /* ---- Swipe-to-drop ---- */
+        .swipe-drop-outer { margin-top: 10px; }
+
+        .swipe-center-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 7px;
+            font-size: 11px;
+            font-weight: 700;
+            color: #94a3b8;
+        }
+
+        .center-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4b5563;
+            flex-shrink: 0;
+            transition: background 0.35s, box-shadow 0.35s;
+        }
+
+        .center-dot.aligned {
+            background: #22c55e;
+            box-shadow: 0 0 7px rgba(34, 197, 94, 0.7);
+        }
+
+        .swipe-track {
+            position: relative;
+            height: 46px;
+            border-radius: 23px;
+            background: rgba(239, 68, 68, 0.12);
+            border: 2px solid rgba(239, 68, 68, 0.38);
+            overflow: hidden;
+            user-select: none;
+            touch-action: none;
+            transition: border-color 0.3s, box-shadow 0.3s;
+        }
+
+        .swipe-track.center-ready {
+            border-color: rgba(239, 68, 68, 0.82);
+            box-shadow: 0 0 10px rgba(239, 68, 68, 0.32);
+        }
+
+        .swipe-fill {
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 0%;
+            background: linear-gradient(90deg, rgba(239, 68, 68, 0.3), rgba(239, 68, 68, 0.55));
+            border-radius: 23px;
+            pointer-events: none;
+        }
+
+        .swipe-handle {
+            position: absolute;
+            left: 4px;
+            top: 4px;
+            width: 36px;
+            height: 34px;
+            border-radius: 17px;
+            background: #ef4444;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 900;
+            cursor: grab;
+            z-index: 2;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.38);
+            letter-spacing: -1px;
+        }
+
+        .swipe-handle:active { cursor: grabbing; }
+        .swipe-handle.success { background: #16a34a; }
+
+        .swipe-label {
+            position: absolute;
+            left: 50px;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: rgba(239, 68, 68, 0.8);
+            font-size: 11px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            white-space: nowrap;
+            pointer-events: none;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .swipe-success-msg {
+            margin-top: 7px;
+            padding: 6px 10px;
+            border-radius: 6px;
+            background: rgba(22, 163, 74, 0.2);
+            border: 1px solid rgba(22, 163, 74, 0.45);
+            color: #86efac;
+            font-size: 12px;
+            font-weight: 700;
+            text-align: center;
+            display: none;
+        }
+
+        @media (max-width: 1120px) {
+            body {
+                overflow: auto;
+            }
+
+            .mission-shell {
+                min-height: 100vh;
+                height: auto;
+                display: grid;
+                gap: 10px;
+                padding: 86px 10px 10px;
+            }
+
+            #map {
+                position: relative;
+                height: 54vh;
+                min-height: 420px;
+                border-radius: var(--radius);
+                overflow: hidden;
+            }
+
+            .top-bar {
+                grid-template-columns: 1fr;
+                height: auto;
+                gap: 8px;
+            }
+
+            .top-telemetry {
+                grid-template-columns: repeat(3, 1fr);
+            }
+
+            .right-brand {
+                justify-content: space-between;
+            }
+
+            .left-rail,
+            .scale-box,
+            .video-panel,
+            .right-stack,
+            .bottom-hud {
+                position: relative;
+                inset: auto;
+                width: 100%;
+                min-width: 0;
+            }
+
+            .left-rail {
+                grid-template-columns: repeat(3, 1fr);
+            }
+
+            .video-panel {
+                aspect-ratio: 16 / 9;
+            }
+
+            .right-stack {
+                grid-template-rows: auto auto auto;
+            }
+
+            .bottom-hud {
+                max-width: none;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .ready-title {
+                font-size: 21px;
+            }
+
+            .top-telemetry,
+            .bottom-hud,
+            .instrument-row,
+            .controls-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="mission-shell">
+    <div id="map"></div>
+
+    <header class="top-bar">
+        <div class="brand-status">
+            <div class="app-mark">RC</div>
+            <div class="ready-copy">
+                <div class="ready-title">
+                    <span id="ready-text">Ready To Fly</span>
+                    <span id="top-status">Connected</span>
+                </div>
+                <div class="ready-subtitle">Rescue mission monitor</div>
+            </div>
+        </div>
+
+        <div class="top-telemetry">
+            <div class="top-chip">
+                <label>Flight Mode</label>
+                <strong id="mode">N/A</strong>
+            </div>
+            <div class="top-chip">
+                <label>SAT GPS</label>
+                <strong><span id="gps-satellites">0</span></strong>
+            </div>
+            <div class="top-chip">
+                <label>Altitude</label>
+                <strong><span id="alt">N/A</span> m</strong>
+            </div>
+            <div class="top-chip">
+                <label>Compass</label>
+                <strong><span id="heading">N/A</span> deg</strong>
+            </div>
+            <div class="top-chip danger">
+                <label>Person Detected</label>
+                <strong id="person-count">0</strong>
+            </div>
+            <div class="top-chip">
+                <label>Armed</label>
+                <strong id="armed">No</strong>
+            </div>
+        </div>
+
+        <div class="right-brand">
+            <div class="battery-block">
+                <div class="battery-icon" aria-hidden="true"></div>
+                <span><span id="battery">N/A</span> V</span>
+            </div>
+            <div class="qgc-badge">DRONE<span>RESCUE</span></div>
+        </div>
+    </header>
+
+    <nav class="left-rail" aria-label="Quick flight actions">
+        <button class="rail-button" id="rail-plan" type="button"><span class="icon-route"></span>Plan</button>
+        <button class="rail-button" id="rail-takeoff" type="button"><span class="icon-up"></span>Takeoff</button>
+        <button class="rail-button" id="rail-home" type="button"><span class="icon-home"></span>RTL</button>
+    </nav>
+
+    <div class="scale-box">
+        <div class="scale-line"></div>
+        <div>500 ft</div>
+    </div>
+
+    <section class="video-panel" aria-label="Live video stream">
+        <div class="video-titlebar">
+            <span>LIVE VIDEO</span>
+            <span>Detection FPS <span id="detection-fps">0</span></span>
+        </div>
+        <div id="camera-container">
+            <img id="live-camera"
+                 src="/video_feed"
+                 alt="Live UAV Camera"
+                 onerror="this.onerror=null; this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%221280%22 height=%22720%22><rect width=%22100%%22 height=%22100%%22 fill=%22%23000000%22/><text x=%22640%22 y=%22360%22 text-anchor=%22middle%22 fill=%22%23ffffff%22 font-family=%22Arial%22 font-size=%2226%22>WAITING FOR VIDEO</text></svg>';">
+            <button id="zoom-btn" type="button" title="Fullscreen">[]</button>
+        </div>
+        <div class="video-stats">
+            <div class="stat-box">Camera FPS <span class="stat-value" id="camera-fps">0</span></div>
+            <div class="stat-box">REC <span class="stat-value" id="recording-status">No</span></div>
+            <div class="stat-box"><span class="stat-value" id="recording-duration">0</span> s</div>
+        </div>
+    </section>
+
+    <aside class="right-stack">
+        <div class="instrument-row">
+            <div class="instrument" aria-label="Attitude indicator">
+                <div class="horizon-sky" id="horizon-sky"></div>
+                <div class="horizon-line" id="horizon-line"></div>
+                <div class="aircraft-mark"></div>
+                <div class="gyro-readout" id="gyro-readout">R 0 / P 0</div>
+            </div>
+            <div class="instrument" aria-label="Compass">
+                <div class="compass-face"></div>
+                <div class="compass-label north">N</div>
+                <div class="compass-label east">E</div>
+                <div class="compass-label south">S</div>
+                <div class="compass-label west">W</div>
+                <div id="compass-needle"></div>
+                <div id="compass-value">000</div>
+            </div>
+        </div>
+
+        <section class="alert-panel" id="sos-panel">
+            <div class="panel-title">
+                <span>SOS Notification</span>
+                <div class="sos-title-right">
+                    <div class="drop-mode-row" title="Toggle AUTO / MANUAL drop">
+                        <span class="drop-mode-text active-mode" id="drop-label-manual">MAN</span>
+                        <label class="mode-toggle">
+                            <input type="checkbox" id="drop-mode-toggle">
+                            <span class="mode-slider"></span>
+                        </label>
+                        <span class="drop-mode-text" id="drop-label-auto">AUTO</span>
+                    </div>
+                    <span id="sos-state">STANDBY</span>
+                </div>
+            </div>
+            <div id="detection-info">No person detections yet</div>
+            <div id="swipe-drop-container" class="swipe-drop-outer" style="display:none;">
+                <div class="swipe-center-status">
+                    <div class="center-dot" id="center-dot"></div>
+                    <span id="center-status-text">Centering drone over person...</span>
+                </div>
+                <div class="swipe-track" id="swipe-drop-track">
+                    <div class="swipe-fill" id="swipe-fill"></div>
+                    <div class="swipe-handle" id="swipe-handle">&#9654;&#9654;</div>
+                    <span class="swipe-label">SLIDE TO RELEASE BUOY</span>
+                </div>
+                <div class="swipe-success-msg" id="swipe-success-msg">Buoy released — mission resuming</div>
+            </div>
+        </section>
+
+        <section class="control-panel">
+            <div class="control-tabs">
+                <strong>Flight Controls</strong>
+                <span><span id="selected-points-count">0</span> points</span>
+            </div>
+            <div class="controls-grid" id="control-buttons">
+                <button id="arm" type="button">Arm Drone</button>
+                <button id="takeoff" type="button" class="success-btn">Takeoff</button>
+                <button id="land" type="button" class="danger-btn">Land</button>
+                <button id="guided" type="button">GUIDED Mode</button>
+                <button id="return-home" type="button">Return Home</button>
+                <button id="clear-points" type="button" class="warning-btn">Clear Points</button>
+                <button id="fly-selected" type="button" class="purple-btn">Fly Selected Points</button>
+                <button id="save-path" type="button" class="cyan-btn">Save Path</button>
+                <button id="start-person-detection" type="button" class="success-btn">Start Detection</button>
+                <button id="stop-person-detection" type="button">Stop Detection</button>
+                <button id="clear-detections" type="button">Clear Detections</button>
+                <button id="start-record" type="button" class="success-btn">Start Recording</button>
+                <button id="stop-record" type="button" class="danger-btn" disabled>Stop Recording</button>
+                <button id="view-recordings" type="button">View Recordings</button>
+                <select id="speed-select" aria-label="Flight speed">
+                    <option value="0.5">0.5 m/s</option>
+                    <option value="0.7" selected>0.7 m/s</option>
+                    <option value="1.0">1.0 m/s</option>
+                    <option value="1.5">1.5 m/s</option>
+                    <option value="2.0">2.0 m/s</option>
+                </select>
+                <button id="set-speed" type="button">Set Speed</button>
+                <div class="servo-control-row">
+                    <span class="servo-control-title">Manual Servo</span>
+                    <div class="drop-mode-row" title="Open / Close drop servo manually">
+                        <span class="drop-mode-text active-mode" id="servo-label-close">CLOSE</span>
+                        <label class="mode-toggle">
+                            <input type="checkbox" id="servo-toggle">
+                            <span class="mode-slider"></span>
+                        </label>
+                        <span class="drop-mode-text" id="servo-label-open">OPEN</span>
+                    </div>
+                </div>
+            </div>
+            <div id="point-info">Selected Points: None</div>
+            <div class="path-library">
+                <div class="path-library-title">
+                    <span>Saved Flight Paths</span>
+                    <span id="saved-path-count">0</span>
+                </div>
+                <div id="saved-paths-list"></div>
+            </div>
+        </section>
+    </aside>
+
+    <section class="bottom-hud" aria-label="Flight metrics">
+        <div class="hud-metric">
+            <label>Ground Speed</label>
+            <span><span id="velocity">N/A</span> m/s</span>
+        </div>
+        <div class="hud-metric">
+            <label>Distance Traveled</label>
+            <span><span id="distance-traveled">0</span> m</span>
+        </div>
+        <div class="hud-metric">
+            <label>Selected Points</label>
+            <span><span id="selected-points-count-hud">0</span></span>
+        </div>
+    </section>
+</div>
+
+<div id="recordings-modal" class="recordings-modal">
+    <h3>Recorded Videos</h3>
+    <div id="recordings-list"></div>
+    <button id="close-recordings" type="button">Close</button>
+</div>
+<div id="modal-overlay"></div>
+
+<script>
+    const socket = io();
+    const map = L.map('map', { zoomControl: false }).setView([10.85095073, 106.77282902], 20);
+
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+    const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+        maxZoom: 22
+    });
+
+    const googleSat = L.tileLayer('/tiles/{z}/{x}/{y}.png', {
+        attribution: '&copy; Google',
+        maxZoom: 21,
+        minZoom: 1
+    });
+
+    const esriSat = L.tileLayer(
+        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            attribution: 'Tiles &copy; Esri',
+            maxZoom: 22
+        }
+    );
+
+    googleSat.addTo(map);
+    L.control.layers({
+        "OpenStreetMap": osm,
+        "Google Satellite": googleSat,
+        "Esri WorldImagery": esriSat
+    }, {}, { position: 'bottomright' }).addTo(map);
+
+    let droneMarker = null;
+    let homeMarker = null;
+    let pathPolyline = null;
+    let flownPathPolyline = null;
+    const flownPath = [];
+    let lastDroneLatLng = null;
+    let clientDistanceTraveled = 0;
+    let detectionMarkers = new Map();
+    let detectionLayer = L.layerGroup().addTo(map);
+    const sosMarkers = [];   // all SOS circle markers on the map
+    const sosPositions = []; // [{lat, lon}] for dedup
+    let sosCount = 0;
+    let savedPathPolyline = null;
+    let savedPathMarkers = [];
+    const savedPathsKey = 'drone_saved_flight_paths_v1';
+
+    let selectedPoints = [];
+    let pointMarkers = [];
+    let selectionPathPolyline = null;
+
+    let frameCount = 0;
+    let lastFpsTime = Date.now();
+    let lastCameraFpsTelemetry = 0;
+    let isRecording = false;
+    let recordingStartTime = 0;
+    let recordingInterval = null;
+
+    const cameraImg = document.getElementById('live-camera');
+    const zoomBtn = document.getElementById('zoom-btn');
+    const sosPanel = document.getElementById('sos-panel');
+    const sosState = document.getElementById('sos-state');
+    const horizonSky = document.getElementById('horizon-sky');
+    const gyroReadout = document.getElementById('gyro-readout');
+
+    setInterval(() => {
+        const now = Date.now();
+        const elapsed = Math.max((now - lastFpsTime) / 1000, 0.001);
+        const fps = Math.round(frameCount / elapsed);
+        frameCount = 0;
+        lastFpsTime = now;
+        if (now - lastCameraFpsTelemetry > 2500) {
+            document.getElementById('camera-fps').textContent = fps;
+        }
+    }, 1000);
+
+    cameraImg.onload = () => {
+        frameCount++;
+    };
+
+    let isZoomed = false;
+    zoomBtn.addEventListener('click', () => {
+        if (!isZoomed) {
+            cameraImg.style.position = 'fixed';
+            cameraImg.style.top = '0';
+            cameraImg.style.left = '0';
+            cameraImg.style.width = '100vw';
+            cameraImg.style.height = '100vh';
+            cameraImg.style.zIndex = '9999';
+            cameraImg.style.objectFit = 'contain';
+            cameraImg.style.backgroundColor = '#000';
+            zoomBtn.textContent = 'X';
+            zoomBtn.style.position = 'fixed';
+            zoomBtn.style.zIndex = '10000';
+            isZoomed = true;
+        } else {
+            cameraImg.style.position = '';
+            cameraImg.style.top = '';
+            cameraImg.style.left = '';
+            cameraImg.style.width = '';
+            cameraImg.style.height = '';
+            cameraImg.style.zIndex = '';
+            cameraImg.style.objectFit = '';
+            cameraImg.style.backgroundColor = '';
+            zoomBtn.textContent = '[]';
+            zoomBtn.style.position = '';
+            zoomBtn.style.zIndex = '';
+            isZoomed = false;
+        }
+    });
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && isZoomed) zoomBtn.click();
+    });
+
+    document.getElementById('rail-plan').onclick = () => {
+        map.once('click', () => {});
+        updateStatus('Planning mode: click on the map to add waypoints');
+    };
+
+    document.getElementById('rail-takeoff').onclick = () => document.getElementById('takeoff').click();
+    document.getElementById('rail-home').onclick = () => document.getElementById('return-home').click();
+
+    function refreshPointInfo() {
+        const infoEl = document.getElementById('point-info');
+        const countEl = document.getElementById('selected-points-count');
+        const hudCountEl = document.getElementById('selected-points-count-hud');
+
+        countEl.textContent = selectedPoints.length;
+        hudCountEl.textContent = selectedPoints.length;
+
+        if (selectedPoints.length === 0) {
+            infoEl.innerHTML = '<span style="color:#aeb7c6;">Selected Points: None</span>';
+            return;
+        }
+
+        infoEl.innerHTML = selectedPoints.map(p =>
+            `Point ${p.number}: Lat ${p.lat.toFixed(6)}, Lon ${p.lon.toFixed(6)}, Speed ${p.speed.toFixed(1)} m/s`
+        ).join('<br>');
+    }
+
+    map.on('click', function(e) {
+        const lat = e.latlng.lat;
+        const lon = e.latlng.lng;
+        const pointNumber = selectedPoints.length + 1;
+
+        let speedInput = prompt('Enter speed (m/s, default 0.7):', '0.7');
+        if (speedInput === null) return; // user clicked Cancel: don't add the point
+
+        let speed = parseFloat(speedInput);
+        if (isNaN(speed) || speed <= 0) speed = 0.7;
+
+        const point = { lat: lat, lon: lon, number: pointNumber, speed: speed };
+        selectedPoints.push(point);
+
+        const marker = L.marker([lat, lon], {
+            draggable: true,
+            icon: L.divIcon({
+                className: 'custom-div-icon',
+                html: `<div class="point-marker">${pointNumber}</div>`,
+                iconSize: [27, 27],
+                iconAnchor: [14, 14]
+            })
+        }).addTo(map).bindPopup(
+            `Point ${pointNumber}<br>Lat: ${lat.toFixed(6)}<br>Lon: ${lon.toFixed(6)}<br>Speed: ${speed.toFixed(1)} m/s<br><small>Drag to move, click to edit speed</small>`
+        );
+
+        marker.on('dragend', function(ev) {
+            const newLatLng = ev.target.getLatLng();
+            const idx = selectedPoints.findIndex(p => p.number === pointNumber);
+            if (idx !== -1) {
+                selectedPoints[idx].lat = newLatLng.lat;
+                selectedPoints[idx].lon = newLatLng.lng;
+            }
+            updateSelectionPath();
+            refreshPointInfo();
+        });
+
+        marker.on('click', function() {
+            const idx = selectedPoints.findIndex(p => p.number === pointNumber);
+            const currentSpeed = idx !== -1 ? selectedPoints[idx].speed : speed;
+            const newSpeedInput = prompt(`Edit speed for Point ${pointNumber} (current: ${currentSpeed.toFixed(1)} m/s):`, currentSpeed.toString());
+            const newSpeed = parseFloat(newSpeedInput);
+            if (!isNaN(newSpeed) && newSpeed > 0 && idx !== -1) {
+                selectedPoints[idx].speed = newSpeed;
+                const current = marker.getLatLng();
+                marker.bindPopup(
+                    `Point ${pointNumber}<br>Lat: ${current.lat.toFixed(6)}<br>Lon: ${current.lng.toFixed(6)}<br>Speed: ${newSpeed.toFixed(1)} m/s<br><small>Drag to move, click to edit speed</small>`
+                );
+                refreshPointInfo();
+            }
+        });
+
+        pointMarkers.push(marker);
+        updateSelectionPath();
+        refreshPointInfo();
+    });
+
+    function updateSelectionPath() {
+        if (selectionPathPolyline) map.removeLayer(selectionPathPolyline);
+
+        if (selectedPoints.length > 0) {
+            const latlngs = selectedPoints.map(p => [p.lat, p.lon]);
+            selectionPathPolyline = L.polyline(latlngs, {
+                color: '#22d3ee',
+                weight: 4,
+                opacity: 0.9,
+                dashArray: '10, 6'
+            }).addTo(map);
+        }
+    }
+
+    function clearPoints() {
+        selectedPoints = [];
+        pointMarkers.forEach(marker => map.removeLayer(marker));
+        pointMarkers = [];
+        if (selectionPathPolyline) {
+            map.removeLayer(selectionPathPolyline);
+            selectionPathPolyline = null;
+        }
+        refreshPointInfo();
+    }
+
+    function requestJson(url, options = {}) {
+        return fetch(url, {
+            method: options.method || 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: options.body ? JSON.stringify(options.body) : undefined
+        }).then(res => res.json());
+    }
+
+    document.getElementById('arm').onclick = () => {
+        requestJson('/arm')
+            .then(data => {
+                if (data.status === 'armed') {
+                    alert('Drone armed successfully');
+                    updateStatus('Armed and ready');
+                    document.getElementById('armed').textContent = 'Yes';
+                    document.getElementById('armed').style.color = '#166534';
+                } else {
+                    alert('Failed to arm: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                console.error('Arm error:', err);
+                alert('Error arming drone');
+            });
+    };
+
+    document.getElementById('takeoff').onclick = () => {
+        const height = prompt('Enter takeoff height (m):', '4');
+        if (height && !isNaN(height)) {
+            requestJson('/takeoff', { body: {height: parseFloat(height)} })
+                .then(data => {
+                    if (data.status === 'success') {
+                        alert(`Taking off to ${height}m`);
+                        updateStatus('Taking off');
+                    } else {
+                        alert('Takeoff failed: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(err => {
+                    console.error('Takeoff error:', err);
+                    alert('Error during takeoff');
+                });
+        }
+    };
+
+    document.getElementById('land').onclick = () => {
+        if (confirm('Are you sure you want to land?')) {
+            requestJson('/land')
+                .then(data => {
+                    if (data.status === 'success') {
+                        alert('Landing initiated');
+                        updateStatus('Landing');
+                    } else {
+                        alert('Landing failed: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(err => {
+                    console.error('Land error:', err);
+                    alert('Error during landing');
+                });
+        }
+    };
+
+    document.getElementById('guided').onclick = () => {
+        socket.emit('change_mode', {mode: 'GUIDED'});
+        updateStatus('Switching to GUIDED mode');
+    };
+
+    document.getElementById('return-home').onclick = () => {
+        if (confirm('Return to home position?')) {
+            requestJson('/return_home')
+                .then(data => {
+                    if (data.status === 'returning_home') {
+                        alert('Returning to home position');
+                        updateStatus('Returning home');
+                    } else {
+                        alert('Failed to return home: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(err => {
+                    console.error('Return home error:', err);
+                    alert('Error returning home');
+                });
+        }
+    };
+
+    document.getElementById('clear-points').onclick = () => {
+        if (selectedPoints.length > 0 && confirm('Clear all selected points?')) {
+            clearPoints();
+            alert('All points cleared');
+            updateStatus('Points cleared');
+        }
+    };
+
+    document.getElementById('fly-selected').onclick = () => {
+        if (selectedPoints.length === 0) {
+            alert('No points selected. Click on the map to add points.');
+            return;
+        }
+
+        if (confirm(`Fly to ${selectedPoints.length} selected points?`)) {
+            requestJson('/fly_selected', { body: {points: selectedPoints} })
+                .then(data => {
+                    if (data.status === 'mission_started') {
+                        alert(`Mission started with ${selectedPoints.length} points`);
+                        updateStatus('Mission started');
+                    } else {
+                        alert('Failed to start mission: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(err => {
+                    console.error('Fly selected error:', err);
+                    alert('Error starting mission');
+                });
+        }
+    };
+
+    document.getElementById('save-path').onclick = () => {
+        const flown = flownPath.map((p, idx) => ({ index: idx + 1, lat: p[0], lon: p[1] }));
+        const payload = {
+            id: `path_${Date.now()}`,
+            name: `Flight ${new Date().toLocaleString()}`,
+            saved_at: new Date().toISOString(),
+            selected_points: selectedPoints.map(p => ({...p})),
+            flown_path: flown,
+            distance_m: Number(clientDistanceTraveled.toFixed(1))
+        };
+
+        if (payload.selected_points.length === 0 && payload.flown_path.length === 0) {
+            alert('No waypoint or flown path data to save yet.');
+            return;
+        }
+
+        const saved = getSavedPaths();
+        saved.unshift(payload);
+        localStorage.setItem(savedPathsKey, JSON.stringify(saved.slice(0, 30)));
+        renderSavedPaths();
+        showSavedPath(payload);
+        updateStatus('Flight path saved');
+    };
+
+    document.getElementById('start-person-detection').onclick = () => {
+        requestJson('/start_person_detection')
+            .then(data => {
+                if (data.status === 'success') {
+                    alert('Person detection started');
+                    updateStatus('Person detection active');
+                    document.getElementById('start-person-detection').disabled = true;
+                    document.getElementById('stop-person-detection').disabled = false;
+                } else {
+                    alert('Failed to start detection: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                console.error('Start detection error:', err);
+                alert('Error starting detection');
+            });
+    };
+
+    document.getElementById('stop-person-detection').onclick = () => {
+        requestJson('/stop_person_detection')
+            .then(data => {
+                if (data.status === 'success') {
+                    alert('Person detection stopped');
+                    updateStatus('Person detection stopped');
+                    document.getElementById('start-person-detection').disabled = false;
+                    document.getElementById('stop-person-detection').disabled = true;
+                } else {
+                    alert('Failed to stop detection: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                console.error('Stop detection error:', err);
+                alert('Error stopping detection');
+            });
+    };
+
+    document.getElementById('clear-detections').onclick = () => {
+        if (confirm('Clear all person detection markers?')) {
+            requestJson('/clear_person_detections')
+                .then(data => {
+                    if (data.status === 'cleared') {
+                        clearDetectionUi();
+                        updateStatus('Detection markers cleared');
+                    }
+                })
+                .catch(err => {
+                    console.error('Clear detections error:', err);
+                    alert('Error clearing detections');
+                });
+        }
+    };
+
+    document.getElementById('start-record').onclick = () => {
+        requestJson('/start_recording')
+            .then(data => {
+                if (data.status === 'success') {
+                    alert(`Recording started: ${data.filename}`);
+                    document.getElementById('start-record').disabled = true;
+                    document.getElementById('stop-record').disabled = false;
+                    document.getElementById('recording-status').textContent = 'Yes';
+                    document.getElementById('recording-status').style.color = '#fbbf24';
+
+                    isRecording = true;
+                    recordingStartTime = Date.now();
+                    recordingInterval = setInterval(() => {
+                        const duration = Math.floor((Date.now() - recordingStartTime) / 1000);
+                        document.getElementById('recording-duration').textContent = duration;
+                    }, 1000);
+
+                    updateStatus('Recording active');
+                } else {
+                    alert('Failed to start recording: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                console.error('Start recording error:', err);
+                alert('Error starting recording');
+            });
+    };
+
+    document.getElementById('stop-record').onclick = () => {
+        requestJson('/stop_recording')
+            .then(data => {
+                if (data.status === 'success') {
+                    alert(`Recording stopped. Duration: ${data.duration.toFixed(2)}s`);
+                    document.getElementById('start-record').disabled = false;
+                    document.getElementById('stop-record').disabled = true;
+                    document.getElementById('recording-status').textContent = 'No';
+                    document.getElementById('recording-status').style.color = '';
+                    document.getElementById('recording-duration').textContent = '0';
+
+                    isRecording = false;
+                    if (recordingInterval) {
+                        clearInterval(recordingInterval);
+                        recordingInterval = null;
+                    }
+
+                    updateStatus('Recording stopped');
+                } else {
+                    alert('Failed to stop recording: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                console.error('Stop recording error:', err);
+                alert('Error stopping recording');
+            });
+    };
+
+    document.getElementById('view-recordings').onclick = () => {
+        fetch('/get_recordings')
+            .then(res => res.json())
+            .then(data => {
+                const list = document.getElementById('recordings-list');
+                list.innerHTML = '';
+
+                if (data.recordings && data.recordings.length > 0) {
+                    data.recordings.forEach(recording => {
+                        const item = document.createElement('div');
+                        item.innerHTML = `
+                            <div>
+                                <strong>${recording.filename}</strong><br>
+                                <span style="color:#aeb7c6;">${recording.size_mb} MB</span>
+                            </div>
+                            <button onclick="window.open('/recordings/${recording.filename}', '_blank')"
+                                    style="min-height:32px; padding:0 12px; background:#16a34a; color:#fff; border:0; border-radius:7px; font-size:12px; cursor:pointer; font-weight:800;">
+                                Download
+                            </button>
+                        `;
+                        list.appendChild(item);
+                    });
+                } else {
+                    list.innerHTML = '<p style="color:#aeb7c6; text-align:center;">No recordings found</p>';
+                }
+
+                document.getElementById('recordings-modal').style.display = 'block';
+                document.getElementById('modal-overlay').style.display = 'block';
+            })
+            .catch(err => {
+                console.error('Load recordings error:', err);
+                alert('Error loading recordings');
+            });
+    };
+
+    document.getElementById('close-recordings').onclick = closeRecordings;
+    document.getElementById('modal-overlay').onclick = closeRecordings;
+
+    function closeRecordings() {
+        document.getElementById('recordings-modal').style.display = 'none';
+        document.getElementById('modal-overlay').style.display = 'none';
+    }
+
+    document.getElementById('set-speed').onclick = () => {
+        const speed = parseFloat(document.getElementById('speed-select').value);
+        requestJson('/set_speed', { body: {speed: speed} })
+            .then(data => {
+                if (data.status === 'success') {
+                    alert(`Speed set to ${speed} m/s`);
+                    updateStatus(`Speed: ${speed} m/s`);
+                } else {
+                    alert('Failed to set speed: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                console.error('Set speed error:', err);
+                alert('Error setting speed');
+            });
+    };
+
+    function updateStatus(message) {
+        const now = new Date();
+        console.log(`[${now.toLocaleTimeString()}] ${message}`);
+    }
+
+    function distanceMeters(a, b) {
+        const earthRadius = 6371000;
+        const lat1 = a[0] * Math.PI / 180;
+        const lat2 = b[0] * Math.PI / 180;
+        const dLat = (b[0] - a[0]) * Math.PI / 180;
+        const dLon = (b[1] - a[1]) * Math.PI / 180;
+        const h = Math.sin(dLat / 2) ** 2 +
+            Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+        return 2 * earthRadius * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+    }
+
+    function getSavedPaths() {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(savedPathsKey) || '[]');
+            return Array.isArray(parsed) ? parsed : [];
+        } catch (err) {
+            console.warn('Failed to read saved paths:', err);
+            return [];
+        }
+    }
+
+    function clearSavedPathPreview() {
+        if (savedPathPolyline) {
+            map.removeLayer(savedPathPolyline);
+            savedPathPolyline = null;
+        }
+        savedPathMarkers.forEach(marker => map.removeLayer(marker));
+        savedPathMarkers = [];
+    }
+
+    function pathLatLngs(path) {
+        const flown = Array.isArray(path.flown_path) ? path.flown_path : [];
+        if (flown.length > 1) {
+            return flown
+                .filter(p => Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon)))
+                .map(p => [Number(p.lat), Number(p.lon)]);
+        }
+
+        const selected = Array.isArray(path.selected_points) ? path.selected_points : [];
+        return selected
+            .filter(p => Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon)))
+            .map(p => [Number(p.lat), Number(p.lon)]);
+    }
+
+    function showSavedPath(path) {
+        clearSavedPathPreview();
+        const latlngs = pathLatLngs(path);
+        if (latlngs.length === 0) return;
+
+        savedPathPolyline = L.polyline(latlngs, {
+            color: '#22d3ee',
+            weight: 5,
+            opacity: 0.95,
+            dashArray: '12, 6'
+        }).addTo(map).bindPopup(path.name || 'Saved flight path');
+
+        latlngs.forEach((latlng, idx) => {
+            const marker = L.circleMarker(latlng, {
+                radius: idx === 0 || idx === latlngs.length - 1 ? 7 : 4,
+                color: '#ffffff',
+                weight: 2,
+                fillColor: idx === 0 ? '#22c55e' : (idx === latlngs.length - 1 ? '#f59e0b' : '#22d3ee'),
+                fillOpacity: 0.9
+            }).addTo(map);
+            savedPathMarkers.push(marker);
+        });
+
+        if (latlngs.length > 1) {
+            map.fitBounds(savedPathPolyline.getBounds(), { padding: [70, 70] });
+        } else {
+            map.setView(latlngs[0], 18);
+        }
+    }
+
+    function deleteSavedPath(id) {
+        const saved = getSavedPaths().filter(path => path.id !== id);
+        localStorage.setItem(savedPathsKey, JSON.stringify(saved));
+        renderSavedPaths();
+        clearSavedPathPreview();
+    }
+
+    function renderSavedPaths() {
+        const list = document.getElementById('saved-paths-list');
+        const count = document.getElementById('saved-path-count');
+        const saved = getSavedPaths();
+        count.textContent = saved.length;
+
+        if (saved.length === 0) {
+            list.innerHTML = '<span style="color:#aeb7c6; font-size:12px;">No saved paths yet</span>';
+            return;
+        }
+
+        list.innerHTML = '';
+        saved.forEach(path => {
+            const latlngs = pathLatLngs(path);
+            const item = document.createElement('div');
+            item.className = 'path-item';
+            item.setAttribute('role', 'button');
+            item.tabIndex = 0;
+            item.innerHTML = `
+                <span>
+                    <strong>${path.name || 'Saved flight path'}</strong><br>
+                    <span>${latlngs.length} pts | ${(Number(path.distance_m) || 0).toFixed(1)} m</span>
+                </span>
+                <button class="path-delete" type="button" title="Delete">x</button>
+            `;
+            item.onclick = () => showSavedPath(path);
+            item.onkeydown = (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    showSavedPath(path);
+                }
+            };
+            item.querySelector('.path-delete').onclick = (event) => {
+                event.stopPropagation();
+                deleteSavedPath(path.id);
+            };
+            list.appendChild(item);
+        });
+    }
+
+    function updateConnectionState(connected) {
+        const topStatus = document.getElementById('top-status');
+        const readyText = document.getElementById('ready-text');
+        topStatus.textContent = connected ? 'Connected' : 'Disconnected';
+        topStatus.style.borderColor = connected ? 'rgba(22, 163, 74, 0.45)' : 'rgba(220, 38, 38, 0.58)';
+        topStatus.style.backgroundColor = connected ? 'rgba(22, 163, 74, 0.16)' : 'rgba(220, 38, 38, 0.16)';
+        topStatus.style.color = connected ? '#166534' : '#991b1b';
+        readyText.textContent = connected ? 'Ready To Fly' : 'Link Lost';
+    }
+
+    function setSosActive(active, label) {
+        sosPanel.classList.toggle('sos-active', active);
+        sosState.textContent = active ? (label || 'SOS') : 'STANDBY';
+    }
+
+    const SOS_DEDUP_METERS = 12; // positions within this range = same person
+
+    function addPersonDetectionMarker(lat, lon, count, timestamp) {
+        const timeStr = new Date(timestamp * 1000).toLocaleTimeString();
+
+        // Check if this position duplicates an existing SOS marker
+        let matchIdx = -1;
+        for (let i = 0; i < sosPositions.length; i++) {
+            const d = distanceMeters([sosPositions[i].lat, sosPositions[i].lon], [lat, lon]);
+            if (d < SOS_DEDUP_METERS) { matchIdx = i; break; }
+        }
+
+        if (matchIdx !== -1) {
+            // Same position — refresh popup of the existing marker, keep it highlighted
+            const existing = sosMarkers[matchIdx];
+            existing.bindPopup(
+                `<b>SOS #${matchIdx + 1}</b><br>` +
+                `Count: ${count}<br>` +
+                `Lat: ${lat.toFixed(6)}<br>Lon: ${lon.toFixed(6)}<br>` +
+                `Last seen: ${timeStr}`
+            );
+            // Ensure it stays fully visible (in case it was dimmed)
+            existing.setStyle({ fillColor: '#ef4444', fillOpacity: 0.88, radius: 18 });
+            return;
+        }
+
+        // New distinct SOS position — dim all existing markers first
+        sosMarkers.forEach((m, i) => {
+            m.setStyle({ fillColor: '#b91c1c', fillOpacity: 0.5, radius: 11, weight: 2 });
+        });
+
+        sosCount++;
+        const idx = sosCount;
+
+        const marker = L.circleMarker([lat, lon], {
+            radius: 18,
+            fillColor: '#ef4444',
+            color: '#fff',
+            weight: 3,
+            opacity: 1,
+            fillOpacity: 0.88
+        }).addTo(detectionLayer);
+
+        marker.bindPopup(
+            `<b>SOS #${idx}</b><br>` +
+            `Count: ${count}<br>` +
+            `Lat: ${lat.toFixed(6)}<br>Lon: ${lon.toFixed(6)}<br>` +
+            `Time: ${timeStr}`
+        );
+
+        marker.bindTooltip(`SOS #${idx}`, {
+            permanent: true,
+            direction: 'top',
+            offset: [0, -22],
+            className: 'sos-label'
+        });
+
+        sosMarkers.push(marker);
+        sosPositions.push({ lat, lon });
+    }
+
+    function clearDetectionUi() {
+        detectionLayer.clearLayers();
+        detectionMarkers.clear();
+        sosMarkers.length = 0;
+        sosPositions.length = 0;
+        sosCount = 0;
+        document.getElementById('person-count').textContent = '0';
+        document.getElementById('detection-info').innerHTML = 'No person detections yet';
+        setSosActive(false);
+    }
+
+    socket.on('telemetry', function(data) {
+        if (data.error) {
+            console.error('Telemetry error:', data.error);
+            return;
+        }
+
+        updateConnectionState(Boolean(data.connected));
+        updateDropTelemetry(data);
+
+        if (data.lat && data.lon) {
+            const droneLatLng = [data.lat, data.lon];
+
+            if (!droneMarker) {
+                droneMarker = L.marker(droneLatLng, {
+                    icon: L.icon({
+                        iconUrl: 'static/drone.png',
+                        iconSize: [40, 40],
+                        iconAnchor: [20, 20]
+                    })
+                }).addTo(map).bindPopup('Drone Position');
+
+                homeMarker = L.marker(droneLatLng, {
+                    icon: L.icon({
+                        iconUrl: 'static/home.png',
+                        iconSize: [32, 32],
+                        iconAnchor: [16, 32]
+                    })
+                }).addTo(map).bindPopup('Home Position');
+
+                map.setView(droneLatLng, 18);
+            } else {
+                droneMarker.setLatLng(droneLatLng);
+            }
+
+            if (lastDroneLatLng) {
+                const stepDistance = distanceMeters(lastDroneLatLng, droneLatLng);
+                if (Number.isFinite(stepDistance) && stepDistance < 100) {
+                    clientDistanceTraveled += stepDistance;
+                }
+            }
+            lastDroneLatLng = droneLatLng;
+
+            flownPath.push(droneLatLng);
+            if (!flownPathPolyline) {
+                flownPathPolyline = L.polyline(flownPath, {
+                    color: '#f97316',
+                    weight: 4,
+                    opacity: 0.88
+                }).addTo(map);
+            } else {
+                flownPathPolyline.setLatLngs(flownPath);
+            }
+
+            if (flownPath.length > 2000) {
+                flownPath.splice(0, 1000);
+                flownPathPolyline.setLatLngs(flownPath);
+            }
+        }
+
+        document.getElementById('alt').textContent = data.alt !== undefined && data.alt !== null ? data.alt.toFixed(2) : 'N/A';
+        document.getElementById('mode').textContent = data.mode || 'N/A';
+        document.getElementById('velocity').textContent = data.velocity !== undefined && data.velocity !== null ? data.velocity.toFixed(2) : 'N/A';
+
+        if (data.camera_fps !== undefined && data.camera_fps !== null) {
+            document.getElementById('camera-fps').textContent = Number(data.camera_fps).toFixed(1);
+            lastCameraFpsTelemetry = Date.now();
+        }
+
+        if (data.detection_fps !== undefined && data.detection_fps !== null) {
+            document.getElementById('detection-fps').textContent = Number(data.detection_fps).toFixed(1);
+        }
+
+        if (data.roll !== undefined && data.pitch !== undefined) {
+            const roll = Number(data.roll) || 0;
+            const pitch = Number(data.pitch) || 0;
+            const pitchPx = Math.max(-38, Math.min(38, pitch * 1.35));
+            horizonSky.style.transform = `rotate(${-roll}deg) translateY(${pitchPx}px)`;
+            gyroReadout.textContent = `R ${roll.toFixed(0)} / P ${pitch.toFixed(0)}`;
+        }
+
+        if (data.heading !== undefined && data.heading !== null) {
+            const heading = Math.round(data.heading);
+            document.getElementById('heading').textContent = heading;
+            document.getElementById('compass-value').textContent = String(heading).padStart(3, '0');
+            document.getElementById('compass-needle').style.transform = `translate(-50%, -50%) rotate(${heading}deg)`;
+        } else {
+            document.getElementById('heading').textContent = 'N/A';
+            document.getElementById('compass-value').textContent = '---';
+        }
+
+        document.getElementById('person-count').textContent = data.person_count || 0;
+        document.getElementById('distance-traveled').textContent = data.distance_traveled !== undefined && data.distance_traveled !== null ? data.distance_traveled.toFixed(1) : clientDistanceTraveled.toFixed(1);
+
+        if (data.battery !== undefined && data.battery !== null) {
+            document.getElementById('battery').textContent = Number(data.battery).toFixed(1);
+        }
+
+        if (data.gps_satellites !== undefined && data.gps_satellites !== null) {
+            document.getElementById('gps-satellites').textContent = data.gps_satellites;
+        }
+
+        if (data.armed !== undefined && data.armed !== null) {
+            document.getElementById('armed').textContent = data.armed ? 'Yes' : 'No';
+            document.getElementById('armed').style.color = data.armed ? '#166534' : '#991b1b';
+        }
+
+        if (data.mission_paused) {
+            setSosActive(String(data.pause_reason).toUpperCase() === 'SOS', data.pause_reason || 'PAUSED');
+        }
+    });
+
+    socket.on('person_detection_update', function(data) {
+        document.getElementById('person-count').textContent = data.count || 0;
+
+        if (data.lat && data.lon && data.count > 0) {
+            const timestamp = data.timestamp || (Date.now() / 1000);
+            addPersonDetectionMarker(data.lat, data.lon, data.count, timestamp);
+            setSosActive(true, 'SOS');
+
+            document.getElementById('detection-info').innerHTML = `
+                <span class="state-sos">SOS/WARNING detected</span><br>
+                Time: ${new Date(timestamp * 1000).toLocaleTimeString()}<br>
+                Count: ${data.count} person(s)<br>
+                Position: ${data.lat.toFixed(6)}, ${data.lon.toFixed(6)}
+            `;
+
+            const bounds = map.getBounds();
+            if (!bounds.contains([data.lat, data.lon])) {
+                map.panTo([data.lat, data.lon], {animate: true, duration: 1});
+            }
+        }
+    });
+
+    socket.on('mission_status', function(data) {
+        console.log('Mission status:', data);
+        if (data.status === 'completed') {
+            alert('Mission completed successfully');
+            updateStatus('Mission completed');
+        } else if (data.status === 'error') {
+            alert('Mission error: ' + data.error);
+            updateStatus('Mission error: ' + data.error);
+        } else if (typeof data.status === 'string' && data.status.includes('mode_changed_to')) {
+            const mode = data.status.replace('mode_changed_to_', '');
+            alert(`Mode changed to ${mode}`);
+            updateStatus(`Mode: ${mode}`);
+        }
+    });
+
+    socket.on('recording_status', function(data) {
+        if (data.status === 'started') {
+            updateStatus(`Recording started: ${data.filename}`);
+        } else if (data.status === 'stopped') {
+            updateStatus(`Recording stopped: ${data.duration.toFixed(2)}s`);
+        }
+    });
+
+    socket.on('person_detections_cleared', function() {
+        clearDetectionUi();
+        updateStatus('Detection markers cleared');
+    });
+
+    socket.on('planned_path', function(data) {
+        if (pathPolyline) map.removeLayer(pathPolyline);
+
+        if (data.waypoints && data.waypoints.length > 0) {
+            const latlngs = data.waypoints.map(wp => [wp.lat, wp.lon]);
+            pathPolyline = L.polyline(latlngs, {
+                color: '#8b5cf6',
+                weight: 4,
+                opacity: 0.9,
+                dashArray: '12, 8'
+            }).addTo(map);
+
+            if (latlngs.length > 1) {
+                map.fitBounds(pathPolyline.getBounds(), { padding: [60, 60] });
+            }
+        }
+    });
+
+    // ===================== DROP MODE & SWIPE TO DROP =====================
+    const dropModeToggle = document.getElementById('drop-mode-toggle');
+    const swipeContainer = document.getElementById('swipe-drop-container');
+    const swipeTrack = document.getElementById('swipe-drop-track');
+    const swipeFill = document.getElementById('swipe-fill');
+    const swipeHandle = document.getElementById('swipe-handle');
+    const swipeSuccessMsg = document.getElementById('swipe-success-msg');
+    const centerDot = document.getElementById('center-dot');
+    const centerStatusText = document.getElementById('center-status-text');
+    const dropLabelManual = document.getElementById('drop-label-manual');
+    const dropLabelAuto = document.getElementById('drop-label-auto');
+
+    let swipeDragging = false;
+    let swipeOriginX = 0;
+    let swipeMaxX = 0;
+    let _dropMode = 'manual';
+    let _sosActive = false;
+    let _dropReady = true;
+
+    function getPointerX(e) {
+        return e.touches ? e.touches[0].clientX : e.clientX;
+    }
+
+    swipeHandle.addEventListener('mousedown', onSwipeStart);
+    swipeHandle.addEventListener('touchstart', onSwipeStart, { passive: true });
+
+    function onSwipeStart(e) {
+        if (swipeSuccessMsg.style.display === 'block') return;
+        swipeDragging = true;
+        swipeMaxX = swipeTrack.clientWidth - swipeHandle.offsetWidth - 8;
+        swipeOriginX = getPointerX(e) - (parseInt(swipeHandle.style.left) || 4);
+        swipeHandle.style.transition = 'none';
+        swipeFill.style.transition = 'none';
+    }
+
+    document.addEventListener('mousemove', onSwipeMove);
+    document.addEventListener('touchmove', onSwipeMove, { passive: false });
+
+    function onSwipeMove(e) {
+        if (!swipeDragging) return;
+        if (e.cancelable) e.preventDefault();
+        const raw = getPointerX(e) - swipeOriginX;
+        const x = Math.max(4, Math.min(swipeMaxX + 4, raw));
+        const progress = (x - 4) / Math.max(1, swipeMaxX);
+        swipeHandle.style.left = x + 'px';
+        swipeFill.style.width = (progress * 100) + '%';
+        swipeHandle.innerHTML = progress > 0.65 ? '&#10003;' : '&#9654;&#9654;';
+        if (progress >= 0.95) {
+            swipeDragging = false;
+            executeManualDrop();
+        }
+    }
+
+    document.addEventListener('mouseup', onSwipeEnd);
+    document.addEventListener('touchend', onSwipeEnd);
+
+    function onSwipeEnd() {
+        if (!swipeDragging) return;
+        swipeDragging = false;
+        resetSwipeHandle();
+    }
+
+    function resetSwipeHandle() {
+        swipeHandle.style.transition = 'left 0.35s cubic-bezier(0.4,0,0.2,1)';
+        swipeFill.style.transition = 'width 0.35s cubic-bezier(0.4,0,0.2,1)';
+        swipeHandle.style.left = '4px';
+        swipeFill.style.width = '0%';
+        swipeHandle.innerHTML = '&#9654;&#9654;';
+    }
+
+    function executeManualDrop() {
+        swipeHandle.style.transition = 'left 0.15s ease, background 0.15s ease';
+        swipeHandle.style.left = (swipeMaxX + 4) + 'px';
+        swipeFill.style.width = '100%';
+        swipeHandle.innerHTML = '&#10003;';
+        swipeHandle.classList.add('success');
+
+        fetch('/trigger_manual_drop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'success') {
+                swipeSuccessMsg.style.display = 'block';
+                setTimeout(() => {
+                    swipeSuccessMsg.style.display = 'none';
+                    swipeHandle.classList.remove('success');
+                    resetSwipeHandle();
+                }, 3000);
+            } else {
+                alert('Drop failed: ' + (data.error || 'Unknown error'));
+                swipeHandle.classList.remove('success');
+                resetSwipeHandle();
+            }
+        })
+        .catch(() => {
+            alert('Network error when triggering drop');
+            swipeHandle.classList.remove('success');
+            resetSwipeHandle();
+        });
+    }
+
+    function applyDropModeUI(mode) {
+        _dropMode = mode;
+        const isAuto = (mode === 'auto');
+        dropModeToggle.checked = isAuto;
+        dropLabelManual.classList.toggle('active-mode', !isAuto);
+        dropLabelAuto.classList.toggle('active-mode', isAuto);
+        refreshSwipeVisibility();
+    }
+
+    dropModeToggle.addEventListener('change', function () {
+        const mode = this.checked ? 'auto' : 'manual';
+        applyDropModeUI(mode);
+        fetch('/set_drop_mode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode })
+        }).catch(() => {});
+    });
+
+    function refreshSwipeVisibility() {
+        const show = _sosActive && _dropMode === 'manual' && _dropReady;
+        swipeContainer.style.display = show ? 'block' : 'none';
+        if (!show && swipeSuccessMsg.style.display !== 'block') {
+            resetSwipeHandle();
+        }
+    }
+
+    function updateDropTelemetry(data) {
+        if (data.drop_mode !== undefined) applyDropModeUI(data.drop_mode);
+        if (data.sos_active !== undefined) _sosActive = Boolean(data.sos_active);
+        if (data.drop_ready !== undefined) _dropReady = Boolean(data.drop_ready);
+        if (data.drop_center_aligned !== undefined) {
+            const aligned = Boolean(data.drop_center_aligned);
+            if (centerDot) centerDot.classList.toggle('aligned', aligned);
+            if (centerStatusText) {
+                centerStatusText.textContent = aligned
+                    ? 'Drone centered — ready to drop'
+                    : 'Centering drone over person...';
+            }
+            if (swipeTrack) swipeTrack.classList.toggle('center-ready', aligned);
+        }
+        refreshSwipeVisibility();
+    }
+
+    // ===================== MANUAL SERVO TOGGLE =====================
+    const servoToggle = document.getElementById('servo-toggle');
+    const servoLabelOpen = document.getElementById('servo-label-open');
+    const servoLabelClose = document.getElementById('servo-label-close');
+
+    function applyServoLabels(open) {
+        servoLabelOpen.classList.toggle('active-mode', open);
+        servoLabelClose.classList.toggle('active-mode', !open);
+    }
+
+    servoToggle.addEventListener('change', function () {
+        const open = this.checked;
+        applyServoLabels(open);
+        fetch('/set_servo', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ open })
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'success') {
+                updateStatus(`Servo ${open ? 'OPEN' : 'CLOSED'} (manual)`);
+            } else {
+                alert('Servo control failed: ' + (data.error || 'Unknown error'));
+                servoToggle.checked = !open;   // revert UI on failure
+                applyServoLabels(!open);
+            }
+        })
+        .catch(() => {
+            alert('Network error when controlling servo');
+            servoToggle.checked = !open;
+            applyServoLabels(!open);
+        });
+    });
+
+    refreshPointInfo();
+    renderSavedPaths();
+    updateStatus('System ready - connect to drone to begin');
+</script>
+</body>
+</html>
