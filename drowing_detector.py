@@ -24,7 +24,7 @@ class DrowningDetector:
             "ELBOW_ANGLE_SPEED_TH": 140.0,   # fast elbow angle change
 
             # ---- temporal thresholds ----
-            "T_FROZEN": 1.0,                 # seconds of continuous distress before FROZEN
+            "T_FROZEN": 0.5,                 # seconds of continuous distress before FROZEN
             "T_SOS": 2.0,                    # seconds of continuous distress before SOS
             "RESET_GAP": 1.0,                # seconds without trigger to reset
 
