@@ -1820,7 +1820,7 @@ class DroneController:
         pid_ey = 0.0
         if correction_active:
             pid_ex = 0.0 if error_x == 0.0 else self.PID_X.update(-error_x)
-            pid_ey = 0.0 if error_y == 0.0 else self.PID_Y.update(-error_y)
+            pid_ey = 0.0 if error_y == 0.0 else self.PID_Y.update(error_y)
 
         # Body-NED mapping from the bbox center error:
         # bbox below center -> -ey PID -> negative vx; bbox right -> -ex PID -> negative vy.
